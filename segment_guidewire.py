@@ -40,7 +40,7 @@ def extract_guidewire(image_path: str,
     if img is None:
         raise FileNotFoundError(f"Cannot load: {image_path}")
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray_blur = cv2.GaussianBlur(gray, (3, 3), 0)
+    # gray_blur = cv2.GaussianBlur(gray, (3, 3), 0)
 
     # 2. Multi-angle black top hat
     tophat = multi_angle_tophat(gray, ksize=23, n_angles=6)
@@ -98,4 +98,4 @@ if __name__ == "__main__":
     import sys
     path         = sys.argv[1] if len(sys.argv) > 1 else "image.png"
     top_percent  = float(sys.argv[2]) if len(sys.argv) > 2 else 0.5
-    extract_guidewire(path, top_percent=0.1)
+    extract_guidewire(path, top_percent=0.5)
