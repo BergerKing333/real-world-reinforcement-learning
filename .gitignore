@@ -1,2 +1,4 @@
 datasets/
 __pycache__/
+guidewire_pipeline*.png
+guidewire_result*.png
