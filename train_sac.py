@@ -7,13 +7,14 @@ def main():
     rclpy.init()
 
     env = CatheterEnv(
-        max_steps=30,
+        max_steps=5,
         goal_tolerance_px=20.0,
-        use_mock_cv=True,   # switch to False once the real CV path is ready to test
+        use_mock_cv=True,   # False for real CV path testing
     )
 
+    # changed from MlpPolicy - observation is now an image 
     model = SAC(
-        "MlpPolicy",
+        "CnnPolicy",
         env,
         verbose=1,
     )
