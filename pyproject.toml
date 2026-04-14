@@ -7,5 +7,6 @@ requires-python = ">=3.12"
 dependencies = [
     "matplotlib>=3.10.8",
     "opencv-python>=4.13.0.92",
+    "pyqt6>=6.10.2",
     "scikit-image>=0.26.0",
 ]
