@@ -8,5 +8,8 @@ dependencies = [
     "matplotlib>=3.10.8",
     "opencv-python>=4.13.0.92",
     "pyqt6>=6.10.2",
+    "pyserial>=3.5",
+    "pyspin>=1.2.0",
+    "pyyaml>=6.0.3",
     "scikit-image>=0.26.0",
 ]
