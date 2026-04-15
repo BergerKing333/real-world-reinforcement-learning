@@ -63,6 +63,7 @@ def main():
 
     finally:
         # Close everything cleanly even if training crashes
+        
         env.close()
         eval_env.close()
 
