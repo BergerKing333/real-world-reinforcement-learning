@@ -40,7 +40,7 @@ def find_guidewire_tip(skeleton_img, spline_point_count=5):
                 found_next = True
                 break
         if not found_next:
-            print(f"  [spline] stopped at point {current}")
+            # print(f"  [spline] stopped at point {current}")
             break
 
     return tip_position, spline_points[10::10] # Returns (x, y) and the list of spline points
@@ -63,12 +63,13 @@ def detect_dots(gray: np.ndarray,
     if circles is not None:
         for cx, cy, r in np.round(circles[0]).astype(int):
             cv2.circle(dot_mask, (cx, cy), r, 255, -1)
-    print(f"  [dots] detected {0 if circles is None else len(circles[0])} circles")
+    # print(f"  [dots] detected {0 if circles is None else len(circles[0])} circles")
     return dot_mask
 
-def segment_guidewire(image_path):
+def segment_guidewire(raw_image):
     # 1. Load the image in grayscale
-    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    # img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    img = cv2.cvtColor(raw_image, cv2.COLOR_BGR2GRAY)
     if img is None:
         raise FileNotFoundError(f"Could not load image at {image_path}")
 
@@ -95,14 +96,14 @@ def generate_goal_points(tip_position, spline_points, obstacle_mask, num_goal_po
     approximate_direction = np.array(spline_points[0]) - np.array(tip_position)
     approximate_direction = approximate_direction / np.linalg.norm(approximate_direction)
 
-    print(obstacle_mask)
+    # print(obstacle_mask)
     goal_points = []
     for i in range(1000):
         distance = np.random.uniform(30, 50)
         angle = np.random.uniform(0, 2 * np.pi)
 
         tmp_goal_point = np.array(tip_position) + [distance * np.cos(angle), distance * np.sin(angle)]
-        print(tmp_goal_point)
+        # print(tmp_goal_point)
         if (0 <= tmp_goal_point[0] < obstacle_mask.shape[1] and
             0 <= tmp_goal_point[1] < obstacle_mask.shape[0] and
             obstacle_mask[int(tmp_goal_point[1]), int(tmp_goal_point[0])] == 0):

@@ -6,6 +6,8 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import os
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -14,7 +16,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 import gymnasium as gym
 from gymnasium import spaces
-from segment_guidewire import segment_guidewire, find_guidewire_tip, detect_dots, generate_goal_points
+from segmentation_model import segment_guidewire, find_guidewire_tip, detect_dots, generate_goal_points
 
 # Actuation limits
 INSERTION_ABS_MAX_CM  = 15
@@ -29,7 +31,7 @@ IDLE_TIMEOUT    = 40.0   # s — max wait for driver to become idle
 
 
 class CatheterRosBridge(Node):
-    def __init__(self, images_dir: str = '/tmp/catheter_images', jsonl_path: str = '/tmp/catheter_log.jsonl'):
+    def __init__(self, images_dir: str = 'tmp/catheter_images', jsonl_path: str = 'tmp/catheter_log.jsonl'):
         Node.__init__(self, "catheter_bridge_node")
 
         qos_be = QoSProfile(
@@ -48,7 +50,7 @@ class CatheterRosBridge(Node):
         self.create_subscription(String, 'flir/save_response', self._on_image, 10)
 
         # Publish commands and save requests
-        self._cmd_pub  = self.create_publisher(String, 'catheter/command', 10)
+        self.cmd_pub  = self.create_publisher(String, 'catheter/command', 10)
         self._save_pub = self.create_publisher(String, 'flir/save_request', 10)
 
         # Internal state
@@ -107,9 +109,10 @@ class CatheterRosBridge(Node):
     def send_command(self, ins_rel: float, rot_rel: float):
         """Publish a relative move command and clear the done flag."""
         self._done_event.clear()
-        cmd = String()
-        cmd.data = json.dumps({'ins_rel_cm': ins_rel, 'rot_rel_rad': rot_rel})
-        self._cmd_pub.publish(cmd)
+        msg = String()
+        msg.data = json.dumps({'insertion': ins_rel, 'rotation': rot_rel, 'relative': True})
+        self.cmd_pub.publish(msg)
+        print(msg)
 
     def wait_done(self) -> bool:
         return self._done_event.is_set()
@@ -154,6 +157,16 @@ class CatheterRosBridge(Node):
 
 
 # ====================================================================== #
+def load_image(path: str, w: int, h: int) -> np.ndarray:
+    """Load a raw BGR8 .bin file and return RGB uint8 array."""
+    time.sleep(2)
+    raw = np.fromfile(path, dtype=np.uint8)
+    expected = h * w * 3
+    if raw.size != expected:
+        return np.zeros((h, w, 3), dtype=np.uint8)
+    bgr = raw.reshape((h, w, 3))
+    return bgr[:, :, ::-1]  # BGR → RGB
+
 
 class CatheterEnv(gym.Env):
     metadata = {'render_modes': ['rgb_array']}
@@ -164,8 +177,9 @@ class CatheterEnv(gym.Env):
         goal_tolerance_px: float = 15.0,
         crop_size: int = 128,
         goal_distance_mult: float = 1.0,
-        images_dir: str = '/tmp/catheter_images',
-        jsonl_path: str = '/tmp/catheter_log.jsonl',
+        max_spline_points: int = 2,
+        images_dir: str = 'tmp/catheter_images',
+        jsonl_path: str = 'tmp/catheter_log.jsonl',
     ):
         super().__init__()
         self._bridge             = CatheterRosBridge(images_dir=images_dir, jsonl_path=jsonl_path)
@@ -173,6 +187,7 @@ class CatheterEnv(gym.Env):
         self._goal_tolerance_px  = goal_tolerance_px
         self._crop_size          = crop_size
         self._goal_distance_mult = goal_distance_mult
+        self.max_spline_points = max_spline_points
 
         # Action space: [insertion_rel_cm, rotation_rel_rad]
         self.action_space = spaces.Box(
@@ -184,8 +199,9 @@ class CatheterEnv(gym.Env):
         # Observation: grayscale crop centred on tip + normalised pixel coords
         self.observation_space = spaces.Dict({
             'image':   spaces.Box(low=0, high=255, shape=(crop_size, crop_size, 1), dtype=np.uint8),
-            'tip_xy':  spaces.Box(low=0.0, high=1.0, shape=(2,), dtype=np.float32),
-            'goal_xy': spaces.Box(low=0.0, high=1.0, shape=(2,), dtype=np.float32),
+            'tip_xy':  spaces.Box(low=0.0, high=0.0, shape=(2,), dtype=np.float32),
+            'goal_xy': spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+            'spline_points': spaces.Box(low=-1.0, high=1.0, shape=(self.max_spline_points, 2), dtype=np.float32)
         })
 
         self.current_step: int           = 0
@@ -241,9 +257,7 @@ class CatheterEnv(gym.Env):
         obs, reward, terminated, truncated, info
         """
         self.current_step += 1
-
         ins_rel, rot_rel = self._bridge.clamp_action(float(action[0]), float(action[1]))
-
         self._bridge.send_command(ins_rel, rot_rel)
         reached = self._bridge.spin_until(self._bridge.wait_done, MOTION_TIMEOUT)
         if not reached:
@@ -293,6 +307,11 @@ class CatheterEnv(gym.Env):
         if self.current_tip is not None:
             tx, ty = int(self.current_tip[0]), int(self.current_tip[1])
             cv2.circle(frame, (tx, ty), 6, (0, 0, 255), -1)
+
+        cv2.namedWindow("gym environment", cv2.WINDOW_NORMAL)
+        cv2.imshow("gym environment", frame)
+        cv2.resizeWindow("gym environment", 500, 500)
+        cv2.waitKey(0)
         return frame
 
     def close(self):
@@ -323,12 +342,12 @@ class CatheterEnv(gym.Env):
 
         img_path, _w, _h = result
 
-        full_img = cv2.imread(img_path)
+        full_img = load_image(img_path, _w, _h)
         if full_img is None:
             return None, None, None, None
 
         # segment_guidewire expects a file path and returns a boolean skeleton
-        skeleton = segment_guidewire(img_path)
+        skeleton = segment_guidewire(full_img)
         if skeleton is None:
             return None, None, None, None
 
@@ -340,14 +359,28 @@ class CatheterEnv(gym.Env):
         tip_xy = np.array(tip_position, dtype=np.float32)
 
         img_h, img_w = full_img.shape[:2]
-        norm = np.array([img_w, img_h], dtype=np.float32)
+        norm = self._crop_size
+
+        processed_spline = np.zeros((self.max_spline_points, 2), dtype=np.float32)
+        if spline_points:
+            # Subtract absolute tip_xy to make it relative, then normalize
+            sp_arr = (np.array(spline_points, dtype=np.float32) - tip_xy) / norm
+            n_pts = min(len(sp_arr), self.max_spline_points)
+            processed_spline[:n_pts] = sp_arr[:n_pts]
+
+        # --- Process Relative Goal ---
+        if self.current_goal is not None:
+            rel_goal = (self.current_goal - tip_xy) / norm
+        else:
+            rel_goal = np.zeros(2, dtype=np.float32)
+
         obs = {
             'image':   self._crop_around(full_img, tip_xy),
-            'tip_xy':  tip_xy / norm,
-            'goal_xy': (self.current_goal / norm
-                        if self.current_goal is not None
-                        else np.zeros(2, dtype=np.float32)),
+            'tip_xy':  np.zeros(2, dtype=np.float32), # Hardcoded to origin
+            'goal_xy': rel_goal,
+            'spline_points': processed_spline,
         }
+
         return obs, tip_xy, full_img, spline_points
 
     def _crop_around(self, img: np.ndarray, centre: np.ndarray) -> np.ndarray:
@@ -434,10 +467,55 @@ class CatheterEnv(gym.Env):
         # Last resort
         return np.array([w - tip_xy[0], h - tip_xy[1]], dtype=np.float32)
 
-    def _null_obs(self) -> dict:
+def _null_obs(self) -> dict:
         """Zero-filled observation returned on capture failure."""
         return {
             'image':   np.zeros((self._crop_size, self._crop_size, 1), dtype=np.uint8),
             'tip_xy':  np.zeros(2, dtype=np.float32),
             'goal_xy': np.zeros(2, dtype=np.float32),
+            'spline_points': np.zeros((self._max_spline_points, 2), dtype=np.float32),
         }
+
+def visualize_obs(obs):
+    frame = cv2.cvtColor(obs['image'], cv2.COLOR_GRAY2BGR)
+    tip = obs['tip_xy']
+    goal = obs['goal_xy']
+    spline_points = obs['spline_points']
+
+    h = frame.shape[0]
+    w = frame.shape[1]
+    tip = [tip[0] * h + h // 2, tip[1] * w + w // 2]
+    cv2.circle(frame, (int(tip[0]), int(tip[1])), 2, (0, 0, 255), -1)
+
+    goal = [goal[0] * h + h // 2, goal[1] * w + w // 2]
+    cv2.drawMarker(frame, (int(goal[0]), int(goal[1])), (0, 255, 0), cv2.MARKER_CROSS, 5, 2)
+
+    for pt in spline_points:
+        pt_img = [pt[0] * h + h // 2, pt[1] * w + w // 2]
+        cv2.circle(frame, (int(pt_img[0]), int(pt_img[1])), 2, (255, 0, 0), -1)
+
+    cv2.namedWindow("gym environment", cv2.WINDOW_NORMAL)
+    cv2.imshow("gym environment", frame)
+    cv2.resizeWindow("gym environment", 500, 500)
+    cv2.waitKey(0)
+
+if __name__ == "__main__":
+    rclpy.init()
+
+    gymEnv = CatheterEnv()
+
+    print("Waiting for ROS 2 discovery...")
+    time.sleep(1)
+
+    obs, info = gymEnv.reset()
+
+    obs, reward, terminated, truncated, info = gymEnv.step(np.array([1.0, 0.0]))
+    visualize_obs(obs)    
+
+    # Render if needed
+    # gymEnv.render()
+
+    # obs, reward, terminated, trunacted, info = gymEnv.step(np.array([1.0, 0.0]))
+
+    gymEnv.close()
+    rclpy.shutdown()

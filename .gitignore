@@ -4,3 +4,5 @@ guidewire_pipeline*.png
 guidewire_result*.png
 
 /VFiles/
+
+*.bin
