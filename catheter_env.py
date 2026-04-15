@@ -4,6 +4,7 @@ import time
 import threading
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 import rclpy
@@ -24,7 +25,11 @@ class CatheterEnv(Node, gym.Env):
         [delta_insertion_cm, delta_rotation_rad]
 
     Observation space:
-        [tip_x, tip_y, goal_x, goal_y]
+        New: crop_size x crop_size x 3 BGR image centered on the guidewire tip
+        the goal position is drawn as a green dot on the crop so the agent
+        can see where it needs to go relative to tip position (center).
+
+        Previous: [tip_x, tip_y, goal_x, goal_y]
 
     Important note:
     The agent still sends actions in robot control space, but the state and goal
@@ -36,11 +41,14 @@ class CatheterEnv(Node, gym.Env):
 
     def __init__(
         self,
-        max_steps=50,
+        max_steps=5,                  # changed from 50 - temporary value pre-training
         goal_tolerance_px=20.0,
         image_timeout=10.0,
         motion_timeout=45.0,
-        image_shape=(2048, 2448, 3),
+        image_shape=(2048, 2448, 3),  
+        crop_size=224,                # new - size of the square image observation crop around tip
+        goal_dist_px=60.0,            # new - how far ahead on the skeleton to place subgoals (temporary value pre-training)
+        goal_dot_radius=8,            # new - size of the goal marker drawn on the crop 
         use_mock_cv=True,
     ):
         Node.__init__(self, "catheter_rl_env")
@@ -51,6 +59,9 @@ class CatheterEnv(Node, gym.Env):
         self.image_timeout = image_timeout
         self.motion_timeout = motion_timeout
         self.image_shape = image_shape
+        self.crop_size = crop_size                     
+        self.goal_dist_px = goal_dist_px
+        self.goal_dot_radius = goal_dot_radius
         self.use_mock_cv = use_mock_cv
 
         self.current_step = 0
@@ -64,19 +75,24 @@ class CatheterEnv(Node, gym.Env):
         self.goal_xy = None
         self.tip_xy = None
 
-        # Control space
+        # cached between steps so get_obs doesnt need to request a new image
+        self._last_image_bgr = None
+        self._last_skeleton = None
+
+        # Control space 
         self.action_space = spaces.Box(
             low=np.array([-0.1, -math.pi / 6], dtype=np.float32),
             high=np.array([1.0, math.pi / 6], dtype=np.float32),
             dtype=np.float32,
         )
 
-        # Image-space observation: [tip_x, tip_y, goal_x, goal_y]
-        h, w, _ = self.image_shape
+        # changed from 4-float [tip_x tip_y goal_x goal_y] to a crop image
+        # crop centered on the tip
         self.observation_space = spaces.Box(
-            low=np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32),
-            high=np.array([float(w - 1), float(h - 1), float(w - 1), float(h - 1)], dtype=np.float32),
-            dtype=np.float32,
+            low=0,
+            high=255,
+            shape=(self.crop_size, self.crop_size, 3),
+            dtype=np.uint8,
         )
 
         # ROS subscriptions
@@ -182,6 +198,8 @@ class CatheterEnv(Node, gym.Env):
         When use_mock_cv=False, this uses the actual guidewire extraction code.
         """
         if self.use_mock_cv:
+            # ammars original mock tip - computes a fake tip from insertion and rotation
+            # so the gym loop can be tested without a camera attached
             h, w, _ = image_bgr.shape
 
             insertion = float(self.latest_state.get("insertion_cm", 0.0)) if self.latest_state else 0.0
@@ -197,7 +215,10 @@ class CatheterEnv(Node, gym.Env):
             y = float(np.clip(y, 0, h - 1))
             return np.array([x, y], dtype=np.float32)
 
-        _, _, tip_xy = extract_tip_from_image(image_bgr, top_percent=0.5)
+        # changed from _ _ tip_xy - now we also capture the skeleton instead of throwing it away
+        # skeleton is stored so _sample_goal can walk along it to pick a reachable subgoal
+        wire_mask, skeleton, tip_xy = extract_tip_from_image(image_bgr, top_percent=0.5)
+        self._last_skeleton = skeleton
 
         # If tracking fails on one frame, keep going using the previous tip.
         # That makes the environment less brittle while the CV is still being tuned.
@@ -211,6 +232,8 @@ class CatheterEnv(Node, gym.Env):
     def get_current_tip_xy(self):
         image_path, w, h = self.request_image()
         image_bgr = self.load_raw_bgr_image(image_path, w, h)
+        # cache the full frame so get_obs can build the crop without another camera request
+        self._last_image_bgr = image_bgr
         tip_xy = self.extract_tip_xy(image_bgr)
         self.tip_xy = tip_xy
         return tip_xy
@@ -218,19 +241,37 @@ class CatheterEnv(Node, gym.Env):
     # ------------------------------------------------------------------
     # Goal handling
     # ------------------------------------------------------------------
-    def sample_goal_xy(self, margin=100):
+    def _sample_goal(self, skeleton, tip_xy):
         """
-        Sample a goal in image space.
+        Pick a subgoal along the guidewire skeleton.
 
-        For now this is random so the RL pipeline can be developed end-to-end.
+        Real mode: walk the guidewire skeleton and return the point closest
+        to goal_dist_px pixels away from the current tip. That gives us a
+        local reachable subgoal ~3 moves ahead.
 
-        Later this should be replaced by real goal selection logic based on the
-        actual image/task setup rather than a random pixel.
+        Mock / fallback: random offset from tip - this is basically ammars original
+        sample_goal_xy kept as a safety net for when cv fails or mock mode is on.
         """
-        h, w, _ = self.image_shape
-        gx = np.random.uniform(margin, w - margin)
-        gy = np.random.uniform(margin, h - margin)
-        return np.array([gx, gy], dtype=np.float32)
+        # ammars original random goal logic kept here as fallback
+        # fires in mock mode or if the cv pipeline returns an empty skeleton
+        if skeleton is None or self.use_mock_cv:
+            h, w, _ = self.image_shape
+            offset = np.random.uniform(-self.goal_dist_px, self.goal_dist_px, size=2).astype(np.float32)
+            return np.clip(tip_xy + offset, [0.0, 0.0], [float(w - 1), float(h - 1)])
+
+        ys, xs = np.where(skeleton > 0)
+
+        # cv ran but found no wire pixels - fall back to random offset same as above
+        if len(xs) == 0:
+            h, w, _ = self.image_shape
+            offset = np.random.uniform(-self.goal_dist_px, self.goal_dist_px, size=2).astype(np.float32)
+            return np.clip(tip_xy + offset, [0.0, 0.0], [float(w - 1), float(h - 1)])
+
+        # real subgoal selection - find skeleton point ~goal_dist_px ahead of the tip
+        pts = np.stack([xs, ys], axis=1).astype(np.float32)
+        dists = np.linalg.norm(pts - tip_xy, axis=1)
+        idx = int(np.argmin(np.abs(dists - self.goal_dist_px)))
+        return pts[idx]
 
     def set_goal_xy(self, goal_xy):
         self.goal_xy = np.array(goal_xy, dtype=np.float32)
@@ -238,19 +279,61 @@ class CatheterEnv(Node, gym.Env):
     # ------------------------------------------------------------------
     # Observation / reward
     # ------------------------------------------------------------------
+    def _build_crop(self, image_bgr, tip_xy, goal_xy):
+        """
+        Cut a crop_size x crop_size patch from image_bgr centered on tip_xy.
+        If the tip is near the image edge the patch is zero-padded.
+        The goal position is drawn as a filled green circle on the patch so
+        the network can see where to go relative to the tip.
+        """
+        h, w, _ = image_bgr.shape
+        half = self.crop_size // 2
+
+        cx, cy = int(round(float(tip_xy[0]))), int(round(float(tip_xy[1])))
+
+        # window boundaries in full image coords
+        x0, x1 = cx - half, cx + half
+        y0, y1 = cy - half, cy + half
+
+        # how much to pad if the window goes outside the image
+        pad_left   = max(0, -x0)
+        pad_right  = max(0, x1 - w)
+        pad_top    = max(0, -y0)
+        pad_bottom = max(0, y1 - h)
+
+        # clamp to valid image region then extract
+        sx0, sx1 = max(0, x0), min(w, x1)
+        sy0, sy1 = max(0, y0), min(h, y1)
+        patch = image_bgr[sy0:sy1, sx0:sx1].copy()
+
+        # pad to full crop size if tip was near an edge
+        if pad_left or pad_right or pad_top or pad_bottom:
+            patch = np.pad(
+                patch,
+                ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)),
+                mode="constant",
+                constant_values=0,
+            )
+
+        # translate goal into crop-local coords and draw it if visible
+        gx_crop = int(round(float(goal_xy[0]) - x0))
+        gy_crop = int(round(float(goal_xy[1]) - y0))
+        if 0 <= gx_crop < self.crop_size and 0 <= gy_crop < self.crop_size:
+            cv2.circle(patch, (gx_crop, gy_crop), self.goal_dot_radius, (0, 255, 0), -1)
+
+        return patch
+
     def get_obs(self):
         if self.tip_xy is None or self.goal_xy is None:
             raise RuntimeError("tip_xy or goal_xy is not set")
 
-        return np.array(
-            [
-                self.tip_xy[0],
-                self.tip_xy[1],
-                self.goal_xy[0],
-                self.goal_xy[1],
-            ],
-            dtype=np.float32,
-        )
+        # main observation format is the image crop - _build_crop is what actually runs
+        # the zeros branch below is just a defensive guard that should never fire in normal
+        # operation because get_current_tip_xy always sets _last_image_bgr before get_obs is called
+        if self._last_image_bgr is None:
+            return np.zeros((self.crop_size, self.crop_size, 3), dtype=np.uint8)
+
+        return self._build_crop(self._last_image_bgr, self.tip_xy, self.goal_xy)
 
     @staticmethod
     def pixel_distance(p1, p2):
@@ -312,14 +395,15 @@ class CatheterEnv(Node, gym.Env):
 
         self.wait_done()
 
-        # Track current tip in image coordinates
+        # get current tip - also caches _last_image_bgr and _last_skeleton
         self.tip_xy = self.get_current_tip_xy()
 
-        # Goal also lives in image coordinates
+        # changed from random pixel to skeleton-based subgoal
+        # options still lets you pass an explicit goal for evaluation
         if options is not None and "goal_xy" in options:
             self.set_goal_xy(options["goal_xy"])
         else:
-            self.set_goal_xy(self.sample_goal_xy())
+            self.set_goal_xy(self._sample_goal(self._last_skeleton, self.tip_xy))
 
         obs = self.get_obs()
         info = {
@@ -339,6 +423,7 @@ class CatheterEnv(Node, gym.Env):
         self.send_command(insertion_delta, rotation_delta)
         self.wait_done()
 
+        # get_current_tip_xy also refreshes _last_image_bgr and _last_skeleton
         new_tip_xy = self.get_current_tip_xy()
 
         reward, terminated, reward_info = self.compute_reward(old_tip_xy, new_tip_xy)
