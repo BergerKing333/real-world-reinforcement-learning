@@ -142,6 +142,7 @@ class CatheterRosBridge(Node):
         return new_ins - cur_ins, new_rot - cur_rot
 
     def append_record(self, record: dict):
+        return
         with open(self._jsonl_path, 'a') as f:
             f.write(json.dumps(record) + '\n')
 
@@ -188,6 +189,8 @@ class CatheterEnv(gym.Env):
         self._crop_size          = crop_size
         self._goal_distance_mult = goal_distance_mult
         self.max_spline_points = max_spline_points
+
+        self._last_reward = None
 
         # Action space: [insertion_rel_cm, rotation_rel_rad]
         self.action_space = spaces.Box(
@@ -277,7 +280,7 @@ class CatheterEnv(gym.Env):
         self.current_tip    = tip_xy
         self._spline_points = spline_pts
 
-        reward, dist = self._compute_reward(prev_tip, tip_xy, self.current_goal)
+        reward, dist = self._compute_reward(prev_tip, tip_xy, self.current_goal, action)
         terminated = dist < self._goal_tolerance_px
         truncated  = (not terminated) and (self.current_step >= self._max_steps)
 
@@ -301,7 +304,7 @@ class CatheterEnv(gym.Env):
 
         return obs, reward, terminated, truncated, info
 
-    def render(self, headless=True) -> np.ndarray | None:
+    def render(self, headless=False) -> np.ndarray | None:
         """Return an annotated BGR frame (goal = green cross, tip = red circle)."""
         if self.current_image is None:
             return None
@@ -320,7 +323,10 @@ class CatheterEnv(gym.Env):
             for pt in self._spline_points:
                 pt_img = [pt[0], pt[1]]
                 cv2.circle(frame, (int(pt_img[0]), int(pt_img[1])), 4, (255, 0, 0), -1)
-            
+        
+        if self.last_reward is not None:
+            cv2.putText(frame, f"Reward: {self.last_reward}", (80, 80), cv2.FONT_HERSHEY_SIMPLEX, 3, (255, 0, 255), 6)
+
         cv2.imshow("gym environment", frame)
         if not headless:
             cv2.waitKey(1)
@@ -422,6 +428,7 @@ class CatheterEnv(gym.Env):
         prev_tip: np.ndarray,
         curr_tip: np.ndarray,
         goal: np.ndarray,
+        action: np.ndarray
     ) -> tuple[float, float]:
         """
         Dense shaped reward = improvement in distance to goal.
@@ -432,12 +439,21 @@ class CatheterEnv(gym.Env):
         prev_dist = float(np.linalg.norm(prev_tip - goal))
         curr_dist = float(np.linalg.norm(curr_tip - goal))
 
-        reward  = self._goal_distance_mult * (prev_dist - curr_dist)
-        reward -= 0.01
+        linear_delta = (prev_dist - curr_dist) * 0.01
 
-        if curr_dist < self._goal_tolerance_px:
-            reward += 1.0
+        sigma = self._crop_size / 4.0
+        prev_well = math.exp(-(prev_dist**2) / (2 * sigma**2))
+        curr_well = math.exp(-(curr_dist**2) / (2 * sigma**2))
+        gravity_delta = curr_well - prev_well
+        dist_reward = linear_delta + gravity_delta
 
+        action_penalty = -0.02 * np.sum(np.square(action))
+
+        living_penalty = -0.01
+        success_bonus = 1.0 if curr_dist < self._goal_tolerance_px else 0.0
+
+        reward = (dist_reward * 0.1) + action_penalty + living_penalty + success_bonus
+        self.last_reward = reward
         return reward, curr_dist
 
     def _sample_goal(

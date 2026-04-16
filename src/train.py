@@ -1,6 +1,7 @@
 import os
 import cv2
 from pathlib import Path
+import threading
 
 import rclpy
 from stable_baselines3 import SAC
@@ -12,6 +13,8 @@ from gymnasium.wrappers import FilterObservation
 
 from catheter_env2 import CatheterEnv
 
+def save_frame(filename, frame):
+    cv2.imwrite(filename, frame)
 
 def make_env():
     """
@@ -76,7 +79,8 @@ class RecordEpisodeCallback(BaseCallback):
                 
                 # Save the image (e.g., "step_000.png", "step_001.png")
                 filename = os.path.join(ep_folder, f"step_{self.step_in_episode:03d}.png")
-                cv2.imwrite(filename, frame)
+                # cv2.imwrite(filename, frame)
+                threading.Thread(target=save_frame, args=(filename, frame)).start()
                 
             self.step_in_episode += 1
         else:
@@ -118,8 +122,10 @@ def main():
             learning_rate=3e-4,
             buffer_size=100000,
             batch_size=256,
-            gamma=0.99,
+            gamma=0.95,
             tau=0.005,
+            train_freq=1,
+            gradient_steps=4,
             tensorboard_log="./logs/" # Added so you can still track progress
         )
 

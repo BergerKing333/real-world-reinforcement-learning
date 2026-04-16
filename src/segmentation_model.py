@@ -99,7 +99,7 @@ def generate_goal_points(tip_position, spline_points, obstacle_mask, num_goal_po
     # print(obstacle_mask)
     goal_points = []
     for i in range(1000):
-        distance = np.random.uniform(30, 50)
+        distance = np.random.uniform(50, 64)
         angle = np.random.uniform(0, 2 * np.pi)
 
         tmp_goal_point = np.array(tip_position) + [distance * np.cos(angle), distance * np.sin(angle)]
