@@ -19,8 +19,8 @@ from gymnasium import spaces
 from segmentation_model import segment_guidewire, find_guidewire_tip, detect_dots, generate_goal_points
 
 # Actuation limits
-INSERTION_ABS_MAX_CM  = 15
-INSERTION_ABS_MIN_CM  = 0.0
+INSERTION_ABS_MAX_CM  = 35
+INSERTION_ABS_MIN_CM  = 15
 ROTATION_ABS_MAX_RAD  =  math.pi * 2
 ROTATION_ABS_MIN_RAD  = -math.pi * 2
 
@@ -174,7 +174,7 @@ class CatheterEnv(gym.Env):
     def __init__(
         self,
         max_steps_per_goal: int = 10,
-        goal_tolerance_px: float = 15.0,
+        goal_tolerance_px: float = 5.0,
         crop_size: int = 128,
         goal_distance_mult: float = 1.0,
         max_spline_points: int = 2,
@@ -200,7 +200,7 @@ class CatheterEnv(gym.Env):
         self.observation_space = spaces.Dict({
             'image':   spaces.Box(low=0, high=255, shape=(crop_size, crop_size, 1), dtype=np.uint8),
             'tip_xy':  spaces.Box(low=0.0, high=0.0, shape=(2,), dtype=np.float32),
-            'goal_xy': spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+            'goal_xy': spaces.Box(low=-10.0, high=10.0, shape=(2,), dtype=np.float32),
             'spline_points': spaces.Box(low=-1.0, high=1.0, shape=(self.max_spline_points, 2), dtype=np.float32)
         })
 
@@ -209,6 +209,9 @@ class CatheterEnv(gym.Env):
         self.current_tip:  np.ndarray | None = None   # (x, y) in full-image pixels
         self.current_image: np.ndarray | None = None  # last raw BGR frame
         self._spline_points: list | None = None       # trailing spline from last capture
+
+        cv2.namedWindow("gym environment", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("gym environment", 500, 500)
 
     # ------------------------------------------------------------------ #
     #  Gymnasium API                                                       #
@@ -240,6 +243,8 @@ class CatheterEnv(gym.Env):
             self.current_goal = np.array(options['goal_xy'], dtype=np.float32)
         else:
             self.current_goal = self._sample_goal(full_img, tip_xy, spline_pts)
+        
+        obs['goal_xy'] = (self.current_goal - tip_xy) / self._crop_size
 
         info = {
             'tip_xy':  self.current_tip.tolist(),
@@ -296,7 +301,7 @@ class CatheterEnv(gym.Env):
 
         return obs, reward, terminated, truncated, info
 
-    def render(self) -> np.ndarray | None:
+    def render(self, headless=False) -> np.ndarray | None:
         """Return an annotated BGR frame (goal = green cross, tip = red circle)."""
         if self.current_image is None:
             return None
@@ -308,10 +313,9 @@ class CatheterEnv(gym.Env):
             tx, ty = int(self.current_tip[0]), int(self.current_tip[1])
             cv2.circle(frame, (tx, ty), 6, (0, 0, 255), -1)
 
-        cv2.namedWindow("gym environment", cv2.WINDOW_NORMAL)
-        cv2.imshow("gym environment", frame)
-        cv2.resizeWindow("gym environment", 500, 500)
-        cv2.waitKey(0)
+        if not headless:
+            cv2.imshow("gym environment", frame)
+            cv2.waitKey(1)
         return frame
 
     def close(self):

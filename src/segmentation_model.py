@@ -116,11 +116,18 @@ def generate_goal_points(tip_position, spline_points, obstacle_mask, num_goal_po
 # Run the function
 # Replace 'guidewire.jpg' with the actual filename of your image
 if __name__ == "__main__":
-    IMAGE_PATH = 'image.png'
+    IMAGE_PATH = 'tmp/catheter_images/1210728504099.bin'
+    raw = np.fromfile(IMAGE_PATH, dtype=np.uint8)
+    # expected = 2048 * 2448 * 3
+    # if raw.size != expected:
+    #     return np.zeros((h, w, 3), dtype=np.uint8)
+    bgr = raw.reshape((2048, 2448, 3))
+    rgb = bgr[:, :, ::-1]  # BGR → RGB
+    final_mask = segment_guidewire(rgb)
 
     fig, ax = plt.subplots(1, 1, figsize=(16, 16))
     ax.axis('off')
-    final_mask = segment_guidewire(IMAGE_PATH)
+    
 
     end_point, spline_points = find_guidewire_tip(skeleton_img=final_mask)
     ax.imshow(cv2.imread(IMAGE_PATH, cv2.IMREAD_COLOR))
