@@ -131,7 +131,7 @@ def main():
             name_prefix="sac_catheter"
         )
 
-        record_callback = RecordEpisodeCallback(record_freq_episodes=20, save_dir="./training_videos")
+        record_callback = RecordEpisodeCallback(record_freq_episodes=10, save_dir="./training_videos")
 
         callbacks = [checkpoint_callback, record_callback]
 

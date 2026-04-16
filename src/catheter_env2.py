@@ -19,8 +19,8 @@ from gymnasium import spaces
 from segmentation_model import segment_guidewire, find_guidewire_tip, detect_dots, generate_goal_points
 
 # Actuation limits
-INSERTION_ABS_MAX_CM  = 35
-INSERTION_ABS_MIN_CM  = 15
+INSERTION_ABS_MAX_CM  = 20
+INSERTION_ABS_MIN_CM  = 0
 ROTATION_ABS_MAX_RAD  =  math.pi * 2
 ROTATION_ABS_MIN_RAD  = -math.pi * 2
 
@@ -174,7 +174,7 @@ class CatheterEnv(gym.Env):
     def __init__(
         self,
         max_steps_per_goal: int = 10,
-        goal_tolerance_px: float = 5.0,
+        goal_tolerance_px: float = 15.0,
         crop_size: int = 128,
         goal_distance_mult: float = 1.0,
         max_spline_points: int = 2,
@@ -201,7 +201,7 @@ class CatheterEnv(gym.Env):
             'image':   spaces.Box(low=0, high=255, shape=(crop_size, crop_size, 1), dtype=np.uint8),
             'tip_xy':  spaces.Box(low=0.0, high=0.0, shape=(2,), dtype=np.float32),
             'goal_xy': spaces.Box(low=-10.0, high=10.0, shape=(2,), dtype=np.float32),
-            'spline_points': spaces.Box(low=-1.0, high=1.0, shape=(self.max_spline_points, 2), dtype=np.float32)
+            'spline_points': spaces.Box(low=-10.0, high=10.0, shape=(self.max_spline_points, 2), dtype=np.float32)
         })
 
         self.current_step: int           = 0
@@ -301,21 +301,31 @@ class CatheterEnv(gym.Env):
 
         return obs, reward, terminated, truncated, info
 
-    def render(self, headless=False) -> np.ndarray | None:
+    def render(self, headless=True) -> np.ndarray | None:
         """Return an annotated BGR frame (goal = green cross, tip = red circle)."""
         if self.current_image is None:
             return None
         frame = self.current_image.copy()
         if self.current_goal is not None:
             cx, cy = int(self.current_goal[0]), int(self.current_goal[1])
-            cv2.drawMarker(frame, (cx, cy), (0, 255, 0), cv2.MARKER_CROSS, 20, 2)
+            if self._goal_tolerance_px is not None:
+                cv2.circle(frame, (cx, cy), int(self._goal_tolerance_px), (0, 255, 0), 2)
+            else:
+                cv2.drawMarker(frame, (cx, cy), (0, 255, 0), cv2.MARKER_CROSS, 20, 2)
         if self.current_tip is not None:
             tx, ty = int(self.current_tip[0]), int(self.current_tip[1])
             cv2.circle(frame, (tx, ty), 6, (0, 0, 255), -1)
-
+        
+        if self._spline_points is not None:
+            for pt in self._spline_points:
+                pt_img = [pt[0], pt[1]]
+                cv2.circle(frame, (int(pt_img[0]), int(pt_img[1])), 4, (255, 0, 0), -1)
+            
+        cv2.imshow("gym environment", frame)
         if not headless:
-            cv2.imshow("gym environment", frame)
             cv2.waitKey(1)
+        else:
+            cv2.waitKey(0)
         return frame
 
     def close(self):
@@ -465,7 +475,7 @@ class CatheterEnv(gym.Env):
             gy = int(self.np_random.integers(0, h))
             if obstacle_mask[gy, gx] == 0:
                 candidate = np.array([gx, gy], dtype=np.float32)
-                if np.linalg.norm(candidate - tip_xy) >= self._goal_tolerance_px * 2:
+                if np.linalg.norm(candidate - tip_xy) >= self._goal_tolerance_px * 5:
                     return candidate
 
         # Last resort
@@ -513,11 +523,11 @@ if __name__ == "__main__":
 
     obs, info = gymEnv.reset()
 
-    obs, reward, terminated, truncated, info = gymEnv.step(np.array([1.0, 0.0]))
-    visualize_obs(obs)    
+    obs, reward, terminated, truncated, info = gymEnv.step(np.array([0.0, 0.0]))
+    # visualize_obs(obs)
 
     # Render if needed
-    # gymEnv.render()
+    gymEnv.render(headless=True)
 
     # obs, reward, terminated, trunacted, info = gymEnv.step(np.array([1.0, 0.0]))
 
