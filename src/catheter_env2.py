@@ -16,7 +16,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 import gymnasium as gym
 from gymnasium import spaces
-from segmentation_model import segment_guidewire, find_guidewire_tip, detect_dots, generate_goal_points
+from segmentation_model import segment_guidewire, find_guidewire_tip, detect_dots
 
 # Actuation limits
 INSERTION_ABS_MAX_CM  = 20
@@ -227,7 +227,7 @@ class CatheterEnv(gym.Env):
         options (optional dict) keys
         ----------------------------
         goal_xy : (x, y) pixel coords to use as the goal.
-                  If absent, a point is sampled via generate_goal_points().
+                  If absent, a point is sampled from the local spline path.
         """
         super().reset(seed=seed)
         self.current_step = 0
@@ -463,35 +463,66 @@ class CatheterEnv(gym.Env):
         spline_points: list | None = None,
     ) -> np.ndarray:
         """
-        Use generate_goal_points() + detect_dots() (from segment_guidewire.py)
-        to pick a goal that avoids the dot-grid obstacles.
+        Pick a goal from the local spline extracted from the guidewire skeleton.
 
-        Falls back to a random obstacle-free pixel if generate_goal_points
-        returns nothing.
+        The spline points are already ordered away from the tip, so we can walk
+        them in sequence and choose the point whose path distance is closest to
+        the desired subgoal distance. We still reject points that land inside
+        detected dots or too close to the image border.
+
+        Falls back to a random obstacle-free pixel if no valid spline point is
+        available.
         """
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         obstacle_mask = detect_dots(gray)  # uint8, 255 inside dots
-
-        tip_position = (int(tip_xy[0]), int(tip_xy[1]))
-        pts = spline_points if spline_points else [tip_position]
-
-        goals = generate_goal_points(
-            tip_position=tip_position,
-            spline_points=pts,
-            obstacle_mask=obstacle_mask,
-            num_goal_points=1,
+        h, w = img.shape[:2]
+        edge_margin = max(8, int(self._goal_tolerance_px))
+        target_dist_px = max(
+            self._goal_tolerance_px * 2.0,
+            (self._crop_size / 2.0) * self._goal_distance_mult,
         )
-        if goals:
-            return np.array(goals[0], dtype=np.float32)
+
+        if spline_points:
+            ordered_points = [np.array(tip_xy, dtype=np.float32)]
+            ordered_points.extend(np.array(pt, dtype=np.float32) for pt in spline_points)
+
+            # Walk the ordered spline and keep the valid point whose path
+            # distance is closest to the desired local subgoal distance.
+            prev_pt = ordered_points[0]
+            path_dist = 0.0
+            best_candidate = None
+            best_error = float('inf')
+
+            for pt in ordered_points[1:]:
+                step_dist = float(np.linalg.norm(pt - prev_pt))
+                prev_pt = pt
+                if step_dist <= 1e-6:
+                    continue
+
+                path_dist += step_dist
+                x = int(round(float(pt[0])))
+                y = int(round(float(pt[1])))
+
+                if not (edge_margin <= x < w - edge_margin and edge_margin <= y < h - edge_margin):
+                    continue
+                if obstacle_mask[y, x] != 0:
+                    continue
+
+                error = abs(path_dist - target_dist_px)
+                if error < best_error:
+                    best_error = error
+                    best_candidate = pt
+
+            if best_candidate is not None:
+                return np.array(best_candidate, dtype=np.float32)
 
         # Fallback: uniform random pixel that is obstacle-free and far enough away
-        h, w = img.shape[:2]
         for _ in range(200):
             gx = int(self.np_random.integers(0, w))
             gy = int(self.np_random.integers(0, h))
             if obstacle_mask[gy, gx] == 0:
                 candidate = np.array([gx, gy], dtype=np.float32)
-                if np.linalg.norm(candidate - tip_xy) >= self._goal_tolerance_px * 5:
+                if np.linalg.norm(candidate - tip_xy) >= target_dist_px:
                     return candidate
 
         # Last resort
@@ -503,7 +534,7 @@ def _null_obs(self) -> dict:
             'image':   np.zeros((self._crop_size, self._crop_size, 1), dtype=np.uint8),
             'tip_xy':  np.zeros(2, dtype=np.float32),
             'goal_xy': np.zeros(2, dtype=np.float32),
-            'spline_points': np.zeros((self._max_spline_points, 2), dtype=np.float32),
+            'spline_points': np.zeros((self.max_spline_points, 2), dtype=np.float32),
         }
 
 def visualize_obs(obs):
