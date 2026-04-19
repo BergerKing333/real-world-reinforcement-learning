@@ -463,7 +463,7 @@ class CatheterEnv(gym.Env):
         spline_points: list | None = None,
     ) -> np.ndarray:
         """
-        Pick a goal ahead of the tip using the local wire tangent.
+        Pick a goal near the tip using the local wire tangent.
 
         Falls back to a random workspace pixel if no valid cone sample
         is available.
@@ -512,7 +512,7 @@ class CatheterEnv(gym.Env):
             angle = float(self.np_random.uniform(0.0, 2.0 * math.pi))
             forward = np.array([math.cos(angle), math.sin(angle)], dtype=np.float32)
 
-        # sample in a forward cone
+        # sample in forward or retract cones
         d_min = max(
             self._goal_tolerance_px * 2.0,
             (self._crop_size / 4.0) * self._goal_distance_mult,
@@ -522,6 +522,13 @@ class CatheterEnv(gym.Env):
             (self._crop_size / 2.0) * self._goal_distance_mult,
         )
         theta_max = math.radians(60.0)
+        retract_goal_prob = 0.25                                                       # tweak later
+
+        # choose forward or retract mode
+        if float(self.np_random.uniform(0.0, 1.0)) < retract_goal_prob:
+            cone_axis = -forward
+        else:
+            cone_axis = forward
 
         for _ in range(200):
             distance = float(self.np_random.uniform(d_min, d_max))
@@ -529,8 +536,8 @@ class CatheterEnv(gym.Env):
             cos_theta, sin_theta = math.cos(theta), math.sin(theta)
             dir_vec = np.array(
                 [
-                    forward[0] * cos_theta - forward[1] * sin_theta,
-                    forward[0] * sin_theta + forward[1] * cos_theta,
+                    cone_axis[0] * cos_theta - cone_axis[1] * sin_theta,
+                    cone_axis[0] * sin_theta + cone_axis[1] * cos_theta,
                 ],
                 dtype=np.float32,
             )
