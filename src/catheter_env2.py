@@ -16,7 +16,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
 import gymnasium as gym
 from gymnasium import spaces
-from segmentation_model import segment_guidewire, find_guidewire_tip, detect_dots
+from segmentation_model import segment_guidewire, find_guidewire_tip, detect_dots, generate_goal_points
 
 # Actuation limits
 INSERTION_ABS_MAX_CM  = 20
@@ -227,7 +227,7 @@ class CatheterEnv(gym.Env):
         options (optional dict) keys
         ----------------------------
         goal_xy : (x, y) pixel coords to use as the goal.
-                  If absent, a point is sampled from the local spline path.
+                  If absent, a point is sampled from a forward cone.
         """
         super().reset(seed=seed)
         self.current_step = 0
@@ -463,70 +463,99 @@ class CatheterEnv(gym.Env):
         spline_points: list | None = None,
     ) -> np.ndarray:
         """
-        Pick a goal from the local spline extracted from the guidewire skeleton.
+        Pick a goal ahead of the tip using the local wire tangent.
 
-        The spline points are already ordered away from the tip, so we can walk
-        them in sequence and choose the point whose path distance is closest to
-        the desired subgoal distance. We still reject points that land inside
-        detected dots or too close to the image border.
-
-        Falls back to a random obstacle-free pixel if no valid spline point is
-        available.
+        Falls back to a random workspace pixel if no valid cone sample
+        is available.
         """
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        obstacle_mask = detect_dots(gray)  # uint8, 255 inside dots
         h, w = img.shape[:2]
-        edge_margin = max(8, int(self._goal_tolerance_px))
-        target_dist_px = max(
-            self._goal_tolerance_px * 2.0,
-            (self._crop_size / 2.0) * self._goal_distance_mult,
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        obstacle_mask = detect_dots(gray)
+
+        # grow dots for clearance
+        clearance_px = max(4, int(self._goal_tolerance_px // 2))
+        kernel_size = 2 * clearance_px + 1
+        dilated_obstacles = cv2.dilate(
+            obstacle_mask,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)),
         )
 
+        # bound goals to the dotted workspace
+        ys, xs = np.where(obstacle_mask > 0)
+        edge_margin = max(8, int(self._goal_tolerance_px))
+        if xs.size > 0 and ys.size > 0:
+            wx_min = max(int(xs.min()) + edge_margin, edge_margin)
+            wx_max = min(int(xs.max()) - edge_margin, w - edge_margin - 1)
+            wy_min = max(int(ys.min()) + edge_margin, edge_margin)
+            wy_max = min(int(ys.max()) - edge_margin, h - edge_margin - 1)
+        else:
+            wx_min, wy_min = edge_margin, edge_margin
+            wx_max, wy_max = w - edge_margin - 1, h - edge_margin - 1
+
+        if wx_max <= wx_min or wy_max <= wy_min:
+            wx_min, wy_min = edge_margin, edge_margin
+            wx_max, wy_max = w - edge_margin - 1, h - edge_margin - 1
+
+        # use spline only for heading
+        forward = None
         if spline_points:
-            ordered_points = [np.array(tip_xy, dtype=np.float32)]
-            ordered_points.extend(np.array(pt, dtype=np.float32) for pt in spline_points)
+            ref = np.mean(
+                np.asarray(spline_points[: min(3, len(spline_points))], dtype=np.float32),
+                axis=0,
+            )
+            direction = np.asarray(tip_xy, dtype=np.float32) - ref
+            direction_norm = float(np.linalg.norm(direction))
+            if direction_norm > 1e-3:
+                forward = direction / direction_norm
 
-            # Walk the ordered spline and keep the valid point whose path
-            # distance is closest to the desired local subgoal distance.
-            prev_pt = ordered_points[0]
-            path_dist = 0.0
-            best_candidate = None
-            best_error = float('inf')
+        if forward is None:
+            angle = float(self.np_random.uniform(0.0, 2.0 * math.pi))
+            forward = np.array([math.cos(angle), math.sin(angle)], dtype=np.float32)
 
-            for pt in ordered_points[1:]:
-                step_dist = float(np.linalg.norm(pt - prev_pt))
-                prev_pt = pt
-                if step_dist <= 1e-6:
-                    continue
+        # sample in a forward cone
+        d_min = max(
+            self._goal_tolerance_px * 2.0,
+            (self._crop_size / 4.0) * self._goal_distance_mult,
+        )
+        d_max = max(
+            d_min + 10.0,
+            (self._crop_size / 2.0) * self._goal_distance_mult,
+        )
+        theta_max = math.radians(60.0)
 
-                path_dist += step_dist
-                x = int(round(float(pt[0])))
-                y = int(round(float(pt[1])))
-
-                if not (edge_margin <= x < w - edge_margin and edge_margin <= y < h - edge_margin):
-                    continue
-                if obstacle_mask[y, x] != 0:
-                    continue
-
-                error = abs(path_dist - target_dist_px)
-                if error < best_error:
-                    best_error = error
-                    best_candidate = pt
-
-            if best_candidate is not None:
-                return np.array(best_candidate, dtype=np.float32)
-
-        # Fallback: uniform random pixel that is obstacle-free and far enough away
         for _ in range(200):
-            gx = int(self.np_random.integers(0, w))
-            gy = int(self.np_random.integers(0, h))
-            if obstacle_mask[gy, gx] == 0:
-                candidate = np.array([gx, gy], dtype=np.float32)
-                if np.linalg.norm(candidate - tip_xy) >= target_dist_px:
-                    return candidate
+            distance = float(self.np_random.uniform(d_min, d_max))
+            theta = float(self.np_random.uniform(-theta_max, theta_max))
+            cos_theta, sin_theta = math.cos(theta), math.sin(theta)
+            dir_vec = np.array(
+                [
+                    forward[0] * cos_theta - forward[1] * sin_theta,
+                    forward[0] * sin_theta + forward[1] * cos_theta,
+                ],
+                dtype=np.float32,
+            )
+            candidate = np.asarray(tip_xy, dtype=np.float32) + distance * dir_vec
+            gx = int(round(float(candidate[0])))
+            gy = int(round(float(candidate[1])))
 
-        # Last resort
-        return np.array([w - tip_xy[0], h - tip_xy[1]], dtype=np.float32)
+            if not (wx_min <= gx <= wx_max and wy_min <= gy <= wy_max):
+                continue
+            if dilated_obstacles[gy, gx] != 0:
+                continue
+            return candidate
+
+        # fallback inside the workspace
+        for _ in range(200):
+            gx = int(self.np_random.integers(wx_min, wx_max + 1))
+            gy = int(self.np_random.integers(wy_min, wy_max + 1))
+            if dilated_obstacles[gy, gx] != 0:
+                continue
+            candidate = np.array([gx, gy], dtype=np.float32)
+            if np.linalg.norm(candidate - np.asarray(tip_xy, dtype=np.float32)) >= d_min:
+                return candidate
+
+        # last resort mirror across the image
+        return np.array([w - 1 - float(tip_xy[0]), h - 1 - float(tip_xy[1])], dtype=np.float32)
 
 def _null_obs(self) -> dict:
         """Zero-filled observation returned on capture failure."""
@@ -534,7 +563,7 @@ def _null_obs(self) -> dict:
             'image':   np.zeros((self._crop_size, self._crop_size, 1), dtype=np.uint8),
             'tip_xy':  np.zeros(2, dtype=np.float32),
             'goal_xy': np.zeros(2, dtype=np.float32),
-            'spline_points': np.zeros((self.max_spline_points, 2), dtype=np.float32),
+            'spline_points': np.zeros((self._max_spline_points, 2), dtype=np.float32),
         }
 
 def visualize_obs(obs):
