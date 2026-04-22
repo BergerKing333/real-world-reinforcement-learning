@@ -226,7 +226,7 @@ class CatheterEnv(gym.Env):
         options (optional dict) keys
         ----------------------------
         goal_xy : (x, y) pixel coords to use as the goal.
-                  If absent, a point is sampled via generate_goal_points().
+                  If absent, a point is sampled from a forward cone.
         """
         super().reset(seed=seed)
         self.current_step = 0
@@ -473,39 +473,106 @@ class CatheterEnv(gym.Env):
         spline_points: list | None = None,
     ) -> np.ndarray:
         """
-        Use generate_goal_points() + detect_dots() (from segment_guidewire.py)
-        to pick a goal that avoids the dot-grid obstacles.
+        Pick a goal near the tip using the local wire tangent.
 
-        Falls back to a random obstacle-free pixel if generate_goal_points
-        returns nothing.
+        Falls back to a random workspace pixel if no valid cone sample
+        is available.
         """
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        obstacle_mask = detect_dots(gray)  # uint8, 255 inside dots
-
-        tip_position = (int(tip_xy[0]), int(tip_xy[1]))
-        pts = spline_points if spline_points else [tip_position]
-
-        goals = generate_goal_points(
-            tip_position=tip_position,
-            spline_points=pts,
-            obstacle_mask=obstacle_mask,
-            num_goal_points=1,
-        )
-        if goals:
-            return np.array(goals[0], dtype=np.float32)
-
-        # Fallback: uniform random pixel that is obstacle-free and far enough away
         h, w = img.shape[:2]
-        for _ in range(200):
-            gx = int(self.np_random.integers(0, w))
-            gy = int(self.np_random.integers(0, h))
-            if obstacle_mask[gy, gx] == 0:
-                candidate = np.array([gx, gy], dtype=np.float32)
-                if np.linalg.norm(candidate - tip_xy) >= self._goal_tolerance_px * 5:
-                    return candidate
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        obstacle_mask = detect_dots(gray)
 
-        # Last resort
-        return np.array([w - tip_xy[0], h - tip_xy[1]], dtype=np.float32)
+        # grow dots for clearance
+        clearance_px = max(4, int(self._goal_tolerance_px // 2))
+        kernel_size = 2 * clearance_px + 1
+        dilated_obstacles = cv2.dilate(
+            obstacle_mask,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)),
+        )
+
+        # bound goals to the dotted workspace
+        ys, xs = np.where(obstacle_mask > 0)
+        edge_margin = max(8, int(self._goal_tolerance_px))
+        if xs.size > 0 and ys.size > 0:
+            wx_min = max(int(xs.min()) + edge_margin, edge_margin)
+            wx_max = min(int(xs.max()) - edge_margin, w - edge_margin - 1)
+            wy_min = max(int(ys.min()) + edge_margin, edge_margin)
+            wy_max = min(int(ys.max()) - edge_margin, h - edge_margin - 1)
+        else:
+            wx_min, wy_min = edge_margin, edge_margin
+            wx_max, wy_max = w - edge_margin - 1, h - edge_margin - 1
+
+        if wx_max <= wx_min or wy_max <= wy_min:
+            wx_min, wy_min = edge_margin, edge_margin
+            wx_max, wy_max = w - edge_margin - 1, h - edge_margin - 1
+
+        # use spline only for heading
+        forward = None
+        if spline_points:
+            ref = np.mean(
+                np.asarray(spline_points[: min(3, len(spline_points))], dtype=np.float32),
+                axis=0,
+            )
+            direction = np.asarray(tip_xy, dtype=np.float32) - ref
+            direction_norm = float(np.linalg.norm(direction))
+            if direction_norm > 1e-3:
+                forward = direction / direction_norm
+
+        if forward is None:
+            angle = float(self.np_random.uniform(0.0, 2.0 * math.pi))
+            forward = np.array([math.cos(angle), math.sin(angle)], dtype=np.float32)
+
+        # sample in forward or retract cones
+        d_min = max(
+            self._goal_tolerance_px * 2.0,
+            (self._crop_size / 4.0) * self._goal_distance_mult,
+        )
+        d_max = max(
+            d_min + 10.0,
+            (self._crop_size / 2.0) * self._goal_distance_mult,
+        )
+        theta_max = math.radians(60.0)
+        retract_goal_prob = 0.25                                                       # tweak later
+
+        # choose forward or retract mode
+        if float(self.np_random.uniform(0.0, 1.0)) < retract_goal_prob:
+            cone_axis = -forward
+        else:
+            cone_axis = forward
+
+        for _ in range(200):
+            distance = float(self.np_random.uniform(d_min, d_max))
+            theta = float(self.np_random.uniform(-theta_max, theta_max))
+            cos_theta, sin_theta = math.cos(theta), math.sin(theta)
+            dir_vec = np.array(
+                [
+                    cone_axis[0] * cos_theta - cone_axis[1] * sin_theta,
+                    cone_axis[0] * sin_theta + cone_axis[1] * cos_theta,
+                ],
+                dtype=np.float32,
+            )
+            candidate = np.asarray(tip_xy, dtype=np.float32) + distance * dir_vec
+            gx = int(round(float(candidate[0])))
+            gy = int(round(float(candidate[1])))
+
+            if not (wx_min <= gx <= wx_max and wy_min <= gy <= wy_max):
+                continue
+            if dilated_obstacles[gy, gx] != 0:
+                continue
+            return candidate
+
+        # fallback inside the workspace
+        for _ in range(200):
+            gx = int(self.np_random.integers(wx_min, wx_max + 1))
+            gy = int(self.np_random.integers(wy_min, wy_max + 1))
+            if dilated_obstacles[gy, gx] != 0:
+                continue
+            candidate = np.array([gx, gy], dtype=np.float32)
+            if np.linalg.norm(candidate - np.asarray(tip_xy, dtype=np.float32)) >= d_min:
+                return candidate
+
+        # last resort mirror across the image
+        return np.array([w - 1 - float(tip_xy[0]), h - 1 - float(tip_xy[1])], dtype=np.float32)
 
     def _null_obs(self) -> dict:
             """Zero-filled observation returned on capture failure."""
