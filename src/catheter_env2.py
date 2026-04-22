@@ -20,9 +20,9 @@ from segmentation_model import segment_guidewire, find_guidewire_tip, detect_dot
 
 # Actuation limits
 INSERTION_ABS_MAX_CM  = 20
-INSERTION_ABS_MIN_CM  = 0
-ROTATION_ABS_MAX_RAD  =  math.pi * 2
-ROTATION_ABS_MIN_RAD  = -math.pi * 2
+INSERTION_ABS_MIN_CM  = 5
+ROTATION_ABS_MAX_RAD  =  np.inf
+ROTATION_ABS_MIN_RAD  = -np.inf
 
 MOTION_TIMEOUT  = 45.0   # s — must be > driver's 30 s timeout
 IMAGE_TIMEOUT   = 10.0   # s — wait for camera save response
@@ -112,7 +112,7 @@ class CatheterRosBridge(Node):
         msg = String()
         msg.data = json.dumps({'insertion': ins_rel, 'rotation': rot_rel, 'relative': True})
         self.cmd_pub.publish(msg)
-        print(msg)
+        # print(msg)
 
     def wait_done(self) -> bool:
         return self._done_event.is_set()
@@ -142,7 +142,6 @@ class CatheterRosBridge(Node):
         return new_ins - cur_ins, new_rot - cur_rot
 
     def append_record(self, record: dict):
-        return
         with open(self._jsonl_path, 'a') as f:
             f.write(json.dumps(record) + '\n')
 
@@ -190,7 +189,7 @@ class CatheterEnv(gym.Env):
         self._goal_distance_mult = goal_distance_mult
         self.max_spline_points = max_spline_points
 
-        self._last_reward = None
+        self.last_reward = None
 
         # Action space: [insertion_rel_cm, rotation_rel_rad]
         self.action_space = spaces.Box(
@@ -203,8 +202,8 @@ class CatheterEnv(gym.Env):
         self.observation_space = spaces.Dict({
             'image':   spaces.Box(low=0, high=255, shape=(crop_size, crop_size, 1), dtype=np.uint8),
             'tip_xy':  spaces.Box(low=0.0, high=0.0, shape=(2,), dtype=np.float32),
-            'goal_xy': spaces.Box(low=-10.0, high=10.0, shape=(2,), dtype=np.float32),
-            'spline_points': spaces.Box(low=-10.0, high=10.0, shape=(self.max_spline_points, 2), dtype=np.float32)
+            'goal_xy': spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+            'spline_points': spaces.Box(low=-1.0, high=1.0, shape=(self.max_spline_points, 2), dtype=np.float32)
         })
 
         self.current_step: int           = 0
@@ -213,8 +212,8 @@ class CatheterEnv(gym.Env):
         self.current_image: np.ndarray | None = None  # last raw BGR frame
         self._spline_points: list | None = None       # trailing spline from last capture
 
-        cv2.namedWindow("gym environment", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("gym environment", 500, 500)
+        # cv2.namedWindow("gym environment", cv2.WINDOW_NORMAL)
+        # cv2.resizeWindow("gym environment", 500, 500)
 
     # ------------------------------------------------------------------ #
     #  Gymnasium API                                                       #
@@ -247,7 +246,8 @@ class CatheterEnv(gym.Env):
         else:
             self.current_goal = self._sample_goal(full_img, tip_xy, spline_pts)
         
-        obs['goal_xy'] = (self.current_goal - tip_xy) / self._crop_size
+        img_h, img_w = full_img.shape[:2]
+        obs['goal_xy'] = (self.current_goal - tip_xy) / np.array([img_w, img_h], dtype=np.float32)
 
         info = {
             'tip_xy':  self.current_tip.tolist(),
@@ -327,11 +327,13 @@ class CatheterEnv(gym.Env):
         if self.last_reward is not None:
             cv2.putText(frame, f"Reward: {self.last_reward}", (80, 80), cv2.FONT_HERSHEY_SIMPLEX, 3, (255, 0, 255), 6)
 
-        cv2.imshow("gym environment", frame)
         if not headless:
+            return frame
+            cv2.imshow("gym environment", frame)
             cv2.waitKey(1)
         else:
-            cv2.waitKey(0)
+            cv2.imwrite(f"tmp/render_{self.current_step:04d}.png", frame)
+            # cv2.waitKey(0)
         return frame
 
     def close(self):
@@ -384,13 +386,13 @@ class CatheterEnv(gym.Env):
         processed_spline = np.zeros((self.max_spline_points, 2), dtype=np.float32)
         if spline_points:
             # Subtract absolute tip_xy to make it relative, then normalize
-            sp_arr = (np.array(spline_points, dtype=np.float32) - tip_xy) / norm
+            sp_arr = (np.array(spline_points, dtype=np.float32) - tip_xy) / np.array([img_w, img_h], dtype=np.float32)
             n_pts = min(len(sp_arr), self.max_spline_points)
             processed_spline[:n_pts] = sp_arr[:n_pts]
 
         # --- Process Relative Goal ---
         if self.current_goal is not None:
-            rel_goal = (self.current_goal - tip_xy) / norm
+            rel_goal = (self.current_goal - tip_xy) / np.array([img_w, img_h], dtype=np.float32)
         else:
             rel_goal = np.zeros(2, dtype=np.float32)
 
@@ -439,21 +441,29 @@ class CatheterEnv(gym.Env):
         prev_dist = float(np.linalg.norm(prev_tip - goal))
         curr_dist = float(np.linalg.norm(curr_tip - goal))
 
-        linear_delta = (prev_dist - curr_dist) * 0.01
+        if np.linalg.norm(curr_tip - prev_tip) > 100:
+            print("Camera Blip")
+            return 0, curr_dist
 
-        sigma = self._crop_size / 4.0
+        # print(f"prev_dist: {prev_dist:.2f}, curr_dist: {curr_dist:.2f}, action: {action}")
+
+        img_h, img_w = self.current_image.shape[:2]
+        sigma = math.sqrt(img_h**2 + img_w**2) * 0.25  # quarter of image diagonal
+
         prev_well = math.exp(-(prev_dist**2) / (2 * sigma**2))
         curr_well = math.exp(-(curr_dist**2) / (2 * sigma**2))
-        gravity_delta = curr_well - prev_well
-        dist_reward = linear_delta + gravity_delta
+        gravity_delta = curr_well - prev_well  # range roughly (-1, 1)
+        gravity_delta *= 10
 
-        action_penalty = -0.02 * np.sum(np.square(action))
-
+        success_bonus = 5.0 if curr_dist < self._goal_tolerance_px else 0.0
         living_penalty = -0.01
-        success_bonus = 1.0 if curr_dist < self._goal_tolerance_px else 0.0
+        living_penalty = 0.0
 
-        reward = (dist_reward * 0.1) + action_penalty + living_penalty + success_bonus
-        self.last_reward = reward
+        # Drop the action penalty or make it tiny
+        reward = gravity_delta + success_bonus + living_penalty
+        self._last_reward = reward
+
+        print(f"Reward: {reward:.3f} (gravity {gravity_delta:.3f}, success {success_bonus}, living {living_penalty})")
         return reward, curr_dist
 
     def _sample_goal(
@@ -497,14 +507,14 @@ class CatheterEnv(gym.Env):
         # Last resort
         return np.array([w - tip_xy[0], h - tip_xy[1]], dtype=np.float32)
 
-def _null_obs(self) -> dict:
-        """Zero-filled observation returned on capture failure."""
-        return {
-            'image':   np.zeros((self._crop_size, self._crop_size, 1), dtype=np.uint8),
-            'tip_xy':  np.zeros(2, dtype=np.float32),
-            'goal_xy': np.zeros(2, dtype=np.float32),
-            'spline_points': np.zeros((self._max_spline_points, 2), dtype=np.float32),
-        }
+    def _null_obs(self) -> dict:
+            """Zero-filled observation returned on capture failure."""
+            return {
+                'image':   np.zeros((self._crop_size, self._crop_size, 1), dtype=np.uint8),
+                'tip_xy':  np.zeros(2, dtype=np.float32),
+                'goal_xy': np.zeros(2, dtype=np.float32),
+                'spline_points': np.zeros((self._max_spline_points, 2), dtype=np.float32),
+            }
 
 def visualize_obs(obs):
     frame = cv2.cvtColor(obs['image'], cv2.COLOR_GRAY2BGR)
@@ -525,7 +535,7 @@ def visualize_obs(obs):
         cv2.circle(frame, (int(pt_img[0]), int(pt_img[1])), 2, (255, 0, 0), -1)
 
     cv2.namedWindow("gym environment", cv2.WINDOW_NORMAL)
-    cv2.imshow("gym environment", frame)
+    # cv2.imshow("gym environment", frame)
     cv2.resizeWindow("gym environment", 500, 500)
     cv2.waitKey(0)
 

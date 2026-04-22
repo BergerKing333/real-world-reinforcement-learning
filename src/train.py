@@ -22,7 +22,7 @@ def make_env():
     so episode rewards and lengths are logged automatically.
     """
     env = CatheterEnv()
-    env = FilterObservation(env, filter_keys=['tip_xy', 'goal_xy', 'spline_points'])
+    env = FilterObservation(env, filter_keys=['goal_xy', 'spline_points'])
     env = Monitor(env)
     return env
 
@@ -125,8 +125,8 @@ def main():
             gamma=0.95,
             tau=0.005,
             train_freq=1,
-            gradient_steps=4,
-            tensorboard_log="./logs/" # Added so you can still track progress
+            gradient_steps=2,
+            tensorboard_log="./logs/"
         )
 
         # Since we removed eval_env to prevent ROS topic collisions, 
