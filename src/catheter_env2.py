@@ -613,6 +613,5 @@ if __name__ == "__main__":
     gymEnv.render(headless=True)
 
     # obs, reward, terminated, trunacted, info = gymEnv.step(np.array([1.0, 0.0]))
-
     gymEnv.close()
     rclpy.shutdown()
