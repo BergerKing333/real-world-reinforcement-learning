@@ -1,0 +1,124 @@
+import json
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+ 
+# ============ LOAD DATA ============
+data = []
+with open('catheter_log.jsonl') as f:
+    for line in f:
+        data.append(json.loads(line))
+ 
+# Split into episodes
+episodes = []
+current_ep = []
+for d in data:
+    current_ep.append(d)
+    if d['terminated'] or d['truncated']:
+        episodes.append(current_ep)
+        current_ep = []
+if current_ep:
+    episodes.append(current_ep)
+ 
+# Use first 289 episodes (before guidewire got stuck)
+first_half = episodes[:289]
+ 
+ep_rewards = [sum(d['reward'] for d in ep) for ep in first_half]
+ep_avg_dist = [sum(d['dist_px'] for d in ep)/len(ep) for ep in first_half]
+ 
+# ============ STYLE ============
+plt.rcParams.update({
+    'font.family': 'serif',
+    'font.size': 11,
+    'axes.labelsize': 13,
+    'axes.titlesize': 14,
+    'legend.fontsize': 10,
+    'figure.dpi': 200,
+    'savefig.dpi': 200,
+    'axes.grid': True,
+    'grid.alpha': 0.3,
+    'axes.spines.top': False,
+    'axes.spines.right': False,
+})
+ 
+C_BLUE = '#2563EB'
+C_RED = '#DC2626'
+C_GREEN = '#16A34A'
+C_ORANGE = '#EA580C'
+C_GRAY = '#94A3B8'
+ 
+# ============ PLOT 1: REWARD CURVE ============
+fig, ax = plt.subplots(figsize=(8, 4.5))
+ 
+ep_rewards_clipped = [min(r, 1.5) for r in ep_rewards]
+ax.plot(range(len(ep_rewards_clipped)), ep_rewards_clipped, color=C_GRAY, alpha=0.35, linewidth=0.7, label='Per-Episode Reward')
+ 
+for window, color, label in [(20, C_BLUE, '20-Episode Rolling Avg'), (50, C_RED, '50-Episode Rolling Avg')]:
+    rolling = np.convolve(ep_rewards_clipped, np.ones(window)/window, mode='valid')
+    ax.plot(range(window-1, len(ep_rewards_clipped)), rolling, color=color, linewidth=2, label=label)
+ 
+goal_eps = [i for i, ep in enumerate(first_half) if any(d['reward'] >= 4.5 for d in ep)]
+for ge in goal_eps:
+    ax.axvline(x=ge, color=C_GREEN, alpha=0.25, linewidth=1, zorder=1)
+ax.scatter(goal_eps, [1.45]*len(goal_eps), color=C_GREEN, s=50, zorder=5, marker='v', label=f'Goal Reached (n={len(goal_eps)})')
+ 
+ax.set_xlabel('Episode')
+ax.set_ylabel('Cumulative Episode Reward (dense only)')
+ax.set_title('Training Reward Curve (Hardware, First 289 Episodes)')
+ax.legend(loc='upper left', framealpha=0.9)
+ax.axhline(y=0, color='black', linewidth=0.5, linestyle='-')
+ax.set_ylim(-1.5, 1.6)
+plt.tight_layout()
+plt.savefig('reward_curve.png', bbox_inches='tight')
+plt.close()
+ 
+# ============ PLOT 2: DISTANCE TO GOAL ============
+fig, ax = plt.subplots(figsize=(8, 4.5))
+ 
+ep_avg_dist_clipped = [min(d, 400) for d in ep_avg_dist]
+ax.plot(range(len(ep_avg_dist_clipped)), ep_avg_dist_clipped, color=C_GRAY, alpha=0.35, linewidth=0.7, label='Per-Episode Avg Distance')
+ 
+window = 20
+rolling_dist = np.convolve(ep_avg_dist, np.ones(window)/window, mode='valid')
+ax.plot(range(window-1, len(ep_avg_dist)), np.clip(rolling_dist, 0, 400), color=C_ORANGE, linewidth=2, label='20-Episode Rolling Avg')
+ 
+window = 50
+rolling_dist50 = np.convolve(ep_avg_dist, np.ones(window)/window, mode='valid')
+ax.plot(range(window-1, len(ep_avg_dist)), np.clip(rolling_dist50, 0, 400), color=C_RED, linewidth=2, label='50-Episode Rolling Avg')
+ 
+clipped_eps = [i for i, d in enumerate(ep_avg_dist) if d > 400]
+if clipped_eps:
+    ax.scatter(clipped_eps, [395]*len(clipped_eps), color='black', marker='^', s=20, zorder=5, label=f'CV outliers clipped (n={len(clipped_eps)})')
+ 
+ax.set_xlabel('Episode')
+ax.set_ylabel('Average Distance to Goal (pixels)')
+ax.set_title('Distance-to-Goal Trend (Hardware, First 289 Episodes)')
+ax.legend(loc='upper right', framealpha=0.9)
+ax.set_ylim(0, 420)
+plt.tight_layout()
+plt.savefig('distance_trend.png', bbox_inches='tight')
+plt.close()
+ 
+# ============ PLOT 3: SUCCESS RATE ============
+fig, ax = plt.subplots(figsize=(8, 4.5))
+ 
+window = 30
+success_rate = []
+for i in range(len(first_half) - window + 1):
+    chunk = first_half[i:i+window]
+    successes = sum(1 for ep in chunk if any(d['reward'] >= 4.5 for d in ep))
+    success_rate.append(successes / window * 100)
+ 
+ax.plot(range(window-1, len(first_half)), success_rate, color=C_GREEN, linewidth=2)
+ax.fill_between(range(window-1, len(first_half)), success_rate, alpha=0.15, color=C_GREEN)
+ 
+ax.set_xlabel('Episode')
+ax.set_ylabel('Success Rate (%)')
+ax.set_title(f'Goal-Reaching Success Rate ({window}-Episode Sliding Window)')
+ax.set_ylim(bottom=0)
+plt.tight_layout()
+plt.savefig('success_rate.png', bbox_inches='tight')
+plt.close()
+ 
+print("All 3 plots saved: reward_curve.png, distance_trend.png, success_rate.png")
