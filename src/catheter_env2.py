@@ -19,8 +19,8 @@ from gymnasium import spaces
 from segmentation_model import segment_guidewire, find_guidewire_tip, detect_dots, generate_goal_points
 
 # Actuation limits
-INSERTION_ABS_MAX_CM  = 20
-INSERTION_ABS_MIN_CM  = 5
+INSERTION_ABS_MAX_CM  = 12
+INSERTION_ABS_MIN_CM  = 0
 ROTATION_ABS_MAX_RAD  =  np.inf
 ROTATION_ABS_MIN_RAD  = -np.inf
 
@@ -106,11 +106,11 @@ class CatheterRosBridge(Node):
             )
         return None
 
-    def send_command(self, ins_rel: float, rot_rel: float):
+    def send_command(self, ins_rel: float, rot_rel: float, relative: bool = True):
         """Publish a relative move command and clear the done flag."""
         self._done_event.clear()
         msg = String()
-        msg.data = json.dumps({'insertion': ins_rel, 'rotation': rot_rel, 'relative': True})
+        msg.data = json.dumps({'insertion': ins_rel, 'rotation': rot_rel, 'relative': relative})
         self.cmd_pub.publish(msg)
         # print(msg)
 
@@ -173,13 +173,14 @@ class CatheterEnv(gym.Env):
 
     def __init__(
         self,
-        max_steps_per_goal: int = 10,
+        max_steps_per_goal: int = 5,
         goal_tolerance_px: float = 15.0,
         crop_size: int = 128,
         goal_distance_mult: float = 1.0,
         max_spline_points: int = 2,
         images_dir: str = 'tmp/catheter_images',
         jsonl_path: str = 'tmp/catheter_log.jsonl',
+        precomputed_goals: list | None = None,
     ):
         super().__init__()
         self._bridge             = CatheterRosBridge(images_dir=images_dir, jsonl_path=jsonl_path)
@@ -188,6 +189,7 @@ class CatheterEnv(gym.Env):
         self._crop_size          = crop_size
         self._goal_distance_mult = goal_distance_mult
         self.max_spline_points = max_spline_points
+        self.precomputed_goals = precomputed_goals
 
         self.last_reward = None
 
@@ -233,6 +235,8 @@ class CatheterEnv(gym.Env):
 
         self._bridge.wait_driver_idle()
 
+        self._bridge.send_command(0.0, 0.0, relative=False)
+
         obs, tip_xy, full_img, spline_pts = self._capture_obs()
         if obs is None:
             raise RuntimeError('reset(): failed to capture initial image.')
@@ -241,7 +245,14 @@ class CatheterEnv(gym.Env):
         self.current_tip    = tip_xy
         self._spline_points = spline_pts
 
-        if options and 'goal_xy' in options:
+        if self.precomputed_goals is not None and len(self.precomputed_goals) > 0:
+            list_idx = self.np_random.integers(0, len(self.precomputed_goals))
+            chosen_list = self.precomputed_goals[list_idx]
+
+            self.goal_list = [np.array(g, dtype=np.float32) for g in chosen_list]
+            self.current_goal_idx = 0
+            self.current_goal = self.goal_list[self.current_goal_idx]
+        elif options and 'goal_xy' in options:
             self.current_goal = np.array(options['goal_xy'], dtype=np.float32)
         else:
             self.current_goal = self._sample_goal(full_img, tip_xy, spline_pts)
@@ -281,8 +292,23 @@ class CatheterEnv(gym.Env):
         self._spline_points = spline_pts
 
         reward, dist = self._compute_reward(prev_tip, tip_xy, self.current_goal, action)
-        terminated = dist < self._goal_tolerance_px
-        truncated  = (not terminated) and (self.current_step >= self._max_steps)
+
+        reached_current_goal = dist < self._goal_tolerance_px
+        terminated = False
+        if reached_current_goal:
+            self.current_goal_idx += 1
+            if self.current_goal_idx < len(self.goal_list):
+                self.current_goal = self.goal_list[self.current_goal_idx]
+                reward += 10.0
+                self._bridge.get_logger().info(f"Goal reached! Moving to next goal ({self.current_goal_idx}/{len(self.goal_list)-1}).")
+            else:
+                terminated = True
+                reward += 20.0
+                self._bridge.get_logger().info("All goals reached! Episode terminated.")
+
+        truncated = (not terminated) and (self.current_step >= self._max_steps)
+
+        obs['goal_xy'] = (self.current_goal - tip_xy) / np.array([full_img.shape[1], full_img.shape[0]], dtype=np.float32)
 
         info = {
             'tip_xy':      tip_xy.tolist(),
@@ -441,7 +467,7 @@ class CatheterEnv(gym.Env):
         prev_dist = float(np.linalg.norm(prev_tip - goal))
         curr_dist = float(np.linalg.norm(curr_tip - goal))
 
-        if np.linalg.norm(curr_tip - prev_tip) > 100:
+        if np.linalg.norm(curr_tip - prev_tip) > 300:
             print("Camera Blip")
             return 0, curr_dist
 
@@ -580,7 +606,7 @@ class CatheterEnv(gym.Env):
                 'image':   np.zeros((self._crop_size, self._crop_size, 1), dtype=np.uint8),
                 'tip_xy':  np.zeros(2, dtype=np.float32),
                 'goal_xy': np.zeros(2, dtype=np.float32),
-                'spline_points': np.zeros((self._max_spline_points, 2), dtype=np.float32),
+                'spline_points': np.zeros((self.max_spline_points, 2), dtype=np.float32),
             }
 
 def visualize_obs(obs):
