@@ -20,10 +20,13 @@ precomputed_goals = [
     [(273, 1026), (379, 1015), (470, 1004), (543, 977), (627, 928), (712, 903), (791, 867), (848, 841), (931, 809), (1011, 752), (1058, 697), (1094, 659), (1134, 619), (1187, 566), (1249, 504), (1294, 457), (1332, 419), (1376, 377), (1431, 362), (1482, 341), (1529, 318), (1576, 298), (1637, 273), (1701, 248)], 
     [(284, 1011), (364, 1028), (428, 1019), (502, 1015), (528, 1051), (576, 1074), (642, 1098), (702, 1113), (761, 1136), (801, 1153), (850, 1174), (899, 1180), (960, 1208), (1016, 1225), (1067, 1223), (1141, 1221), (1207, 1223), (1289, 1221), (1357, 1219), (1412, 1223), (1440, 1221), (1497, 1210), (1550, 1208), (1599, 1227), (1644, 1242), (1684, 1261), (1739, 1280), (1788, 1295), (1832, 1312), (1894, 1333)],
     [(256, 1019), (350, 1007), (458, 1009), (566, 968), (636, 930), (725, 892), (791, 862), (871, 828), (952, 790), (1018, 786), (1079, 786), (1143, 786), (1217, 784), (1289, 784), (1357, 786), (1412, 778), (1465, 775), (1514, 773), (1561, 771), (1599, 754), (1644, 729), (1697, 712), (1754, 689), (1809, 667), (1851, 644), (1877, 638)],
-    [(238, 1012), (335, 1004), (381, 1014), (447, 1021), (447, 1021), (517, 1037), (574, 1057), (629, 1078), (692, 1110), (759, 1131), (812, 1157), (876, 1182), (950, 1205), (950, 1205), (993, 1223), (1021, 1253), (1060, 1299), (1102, 1332), (1145, 1375), (1196, 1415), (1246, 1459), (1300, 1511), (1348, 1553), (1380, 1581), (1403, 1597), (1447, 1620), (1498, 1629), (1518, 1645), (1578, 1666), (1629, 1685), (1686, 1701), (1719, 1728)],
+    [(238, 1012), (335, 1004), (381, 1014), (447, 1021), (447, 1021), (517, 1037), (574, 1057), (629, 1078), (692, 1110), (759, 1131), (812, 1157), (876, 1182), (950, 1205), (993, 1223), (1021, 1253), (1060, 1299), (1102, 1332), (1145, 1375), (1196, 1415), (1246, 1459), (1300, 1511), (1348, 1553), (1380, 1581), (1403, 1597), (1518, 1645), (1578, 1666), (1629, 1685), (1686, 1701), (1719, 1728)],
     [(250, 1030), (345, 1024), (458, 1011), (553, 981), (627, 937), (708, 892), (774, 856), (859, 839), (965, 801), (1026, 792), (1081, 786), (1145, 784), (1232, 788), (1291, 782), (1342, 784), (1393, 773), (1465, 778), (1520, 773), (1563, 773), (1593, 788), (1629, 807), (1669, 826), (1714, 841), (1769, 860), (1824, 884), (1883, 905)],
-    [(292, 1024), (360, 1024), (449, 1026), (513, 1043), (572, 1074), (621, 1089), (661, 1104), (723, 1130), (784, 1149), (835, 1174), (893, 1197), (943, 1214), (999, 1238), (1047, 1282), (1073, 1310), (1111, 1337), (1145, 1375), (1181, 1407), (1228, 1450), (1289, 1494), (1327, 1530), (1364, 1566), (1397, 1607), (1419, 1649), (1442, 1693), (1465, 1740), (1482, 1780), (1504, 1819), (1520, 1855), (1535, 1888), (1552, 1918)]
+    [(292, 1024), (360, 1024), (449, 1026), (513, 1043), (572, 1074), (621, 1089), (661, 1104), (723, 1130), (784, 1149), (835, 1174), (893, 1197), (943, 1214), (999, 1238), (1047, 1282), (1073, 1310), (1111, 1337), (1145, 1375), (1181, 1407), (1228, 1450), (1289, 1494), (1327, 1530), (1364, 1566), (1419, 1649), (1442, 1693), (1465, 1740), (1482, 1780), (1504, 1819), (1552, 1918)]
 ]
+
+# easy way to generate long horizon goals
+# precomputed_goals = [x[-1] for x in precomputed_goals]
 
 def save_frame(filename, frame):
     cv2.imwrite(filename, frame)
@@ -33,22 +36,10 @@ def make_env():
     Create one environment instance and wrap it with Monitor
     so episode rewards and lengths are logged automatically.
     """
-    env = CatheterEnv(precomputed_goals=precomputed_goals)
-    env = FilterObservation(env, filter_keys=['goal_xy', 'spline_points'])
+    env = CatheterEnv(precomputed_goals=precomputed_goals, max_steps_per_goal=60, goal_tolerance_px=45)
+    env = FilterObservation(env, filter_keys=['goal_xy', 'spline_points', 'current_insertion_cm', 'current_rotation_rad'])
     env = Monitor(env)
     return env
-
-# class RenderCallback(BaseCallback):
-#     def __init__(self, render_freq: int, verbose=0):
-#         super().__init__(verbose)
-#         self.render_freq=render_freq
-
-#     def _on_step(self) -> bool:
-#         if self.n_calls % self.render_freq == 0:
-#             self.training_env.envs[0].render()
-#         else:
-#             cv2.waitKey(1)
-#         return True
 
 def delete_bin_files(directory_path: str):
     folder = Path(directory_path)
@@ -102,7 +93,7 @@ class RecordEpisodeCallback(BaseCallback):
         
         if done:
             self.episodes_completed += 1
-            self.step_in_episode = 0 # Reset step counter for the next episode
+            self.step_in_episode = 0
             
             # Decide if the next episode is a recording target
             if self.episodes_completed % self.record_freq == 0:
@@ -125,8 +116,6 @@ def main():
     env = make_env()
 
     try:
-        # Use MultiInputPolicy because the observation is a Dict 
-        # (contains both 'image' and 1D arrays like 'goal_xy', 'spline_points')
         model = SAC(
             policy="MultiInputPolicy",
             env=env,
@@ -141,6 +130,9 @@ def main():
             tensorboard_log="./logs/"
         )
 
+        # model = SAC.load("models_local_goals_1/sac_catheter_env2_final.zip", env=env)
+
+
         # Since we removed eval_env to prevent ROS topic collisions, 
         # use CheckpointCallback to save the model periodically during training.
         checkpoint_callback = CheckpointCallback(
@@ -149,21 +141,18 @@ def main():
             name_prefix="sac_catheter"
         )
 
-        record_callback = RecordEpisodeCallback(record_freq_episodes=10, save_dir="./training_videos")
+        record_callback = RecordEpisodeCallback(record_freq_episodes=5, save_dir="./training_videos")
 
         callbacks = [checkpoint_callback, record_callback]
 
-        # Train the model
         model.learn(
             total_timesteps=10000,
             callback=callbacks
         )
 
-        # Save the final trained model
         model.save("models/sac_catheter_env2_final")
 
     finally:
-        # Close everything cleanly even if training crashes
         env.close()
 
         if rclpy.ok():

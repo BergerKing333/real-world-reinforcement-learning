@@ -31,7 +31,7 @@ from std_msgs.msg import String
 
 CAMERA_IP   = '169.255.0.6'  # GigE camera address
 
-EXPOSURE_US = 20000.0   # microseconds
+EXPOSURE_US = 200000.0   # microseconds
 GAIN_DB     = 0.0       # dB
 GAMMA       = 1.0       # 1.0 = off
 PUBLISH_HZ  = 60        # camera hardware frame rate AND ROS publish rate
@@ -213,8 +213,10 @@ class FLIRCameraNode(Node):
         path = f'{folder}/{time.monotonic_ns()}.bin'
 
         # Publish path immediately — write happens in the background
-        self._publish_path(path, w, h, extra_pubs=[self._save_resp_pub])
-        self._write_raw_async(frame.copy(), path, w, h, publish_to=[])
+        self._write_raw_async(frame.copy(), path, w, h, publish_to=[self._save_resp_pub])
+
+        # self._publish_path(path, w, h, extra_pubs=[self._save_resp_pub])
+
 
     # ------------------------------------------------------------------
     def _write_raw_async(self, frame, path: str, w: int, h: int, publish_to: list):

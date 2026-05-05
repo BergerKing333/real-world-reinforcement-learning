@@ -14,7 +14,7 @@ SILENCE_TIMEOUT  = 3.0    # s — if device goes quiet after acknowledging, assu
 
 driver = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=SERIAL_TIMEOUT)
 
-insert_amount_cm = -15
+insert_amount_cm = -52
 
 cmd_str = f"{(insert_amount_cm * 500):.2f}, 0.0"
 

@@ -48,6 +48,7 @@ class CatheterDriverNode(Node):
         # Tracked absolute position (physical units)
         self._total_insertion = 0.0   # cm
         self._total_rotation  = 0.0   # radians
+        self._insertion_hardware_offset = 0.0
         self._busy            = False
         self._lock            = threading.Lock()
 
@@ -97,6 +98,14 @@ class CatheterDriverNode(Node):
                 self.get_logger().error('Previous action never finished — forcing reset of busy flag.')
                 self._busy = False
 
+        if cmd.get('set_home', False):
+            with self._lock:
+                self._insertion_hardware_offset += self._total_insertion
+                self._total_insertion = 0.0
+                self.get_logger().info('Home position set. Current insertion offset: '
+                                    f'{self._insertion_hardware_offset:.2f} cm')
+            return
+
         if cmd.get('reset', False):
             insertion, rotation, relative = 0.0, 0.0, False
         else:
@@ -117,12 +126,12 @@ class CatheterDriverNode(Node):
             try:
                 if relative:
                     self._total_insertion += insertion
-                    self._total_rotation  += rotation
+                    # self._total_rotation  += rotation
                 else:
                     self._total_insertion = insertion
-                    self._total_rotation  = rotation
+                self._total_rotation = rotation
 
-                ins_units = self._total_insertion * INSERTION_UNITS_PER_CM
+                ins_units = self._total_insertion * INSERTION_UNITS_PER_CM + self._insertion_hardware_offset * INSERTION_UNITS_PER_CM
                 rot_units = (self._total_rotation / (2 * math.pi)) * ROTATION_UNITS_PER_REV
 
                 cmd_str = f'{ins_units:.2f},{rot_units:.2f}\n'

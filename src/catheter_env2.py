@@ -19,7 +19,7 @@ from gymnasium import spaces
 from segmentation_model import segment_guidewire, find_guidewire_tip, detect_dots, generate_goal_points
 
 # Actuation limits
-INSERTION_ABS_MAX_CM  = 12
+INSERTION_ABS_MAX_CM  = 40
 INSERTION_ABS_MIN_CM  = 0
 ROTATION_ABS_MAX_RAD  =  np.inf
 ROTATION_ABS_MIN_RAD  = -np.inf
@@ -145,6 +145,15 @@ class CatheterRosBridge(Node):
         with open(self._jsonl_path, 'a') as f:
             f.write(json.dumps(record) + '\n')
 
+    def get_catheter_total_insertion_rotation(self) -> tuple[float, float]:
+        """Return the current total insertion (cm) and rotation (rad) from the latest state."""
+        if self._latest_state is None:
+            return 0.0, 0.0
+        return (
+            self._latest_state.get('insertion_cm', 0.0),
+            self._latest_state.get('rotation_rad', 0.0)
+        )
+
     def spin_until(self, wait_fn, timeout: float) -> bool:
         """Keep spinning ROS2 callbacks while waiting for a blocking condition."""
         deadline = time.monotonic() + timeout
@@ -159,7 +168,7 @@ class CatheterRosBridge(Node):
 # ====================================================================== #
 def load_image(path: str, w: int, h: int) -> np.ndarray:
     """Load a raw BGR8 .bin file and return RGB uint8 array."""
-    time.sleep(2)
+    time.sleep(1)
     raw = np.fromfile(path, dtype=np.uint8)
     expected = h * w * 3
     if raw.size != expected:
@@ -173,8 +182,8 @@ class CatheterEnv(gym.Env):
 
     def __init__(
         self,
-        max_steps_per_goal: int = 5,
-        goal_tolerance_px: float = 15.0,
+        max_steps_per_goal: int = 30,
+        goal_tolerance_px: float = 35.0,
         crop_size: int = 128,
         goal_distance_mult: float = 1.0,
         max_spline_points: int = 2,
@@ -200,12 +209,14 @@ class CatheterEnv(gym.Env):
             dtype=np.float32,
         )
 
-        # Observation: grayscale crop centred on tip + normalised pixel coords
+        # Observation: grayscale crop centerd on tip + normalised pixel coords
         self.observation_space = spaces.Dict({
             'image':   spaces.Box(low=0, high=255, shape=(crop_size, crop_size, 1), dtype=np.uint8),
             'tip_xy':  spaces.Box(low=0.0, high=0.0, shape=(2,), dtype=np.float32),
             'goal_xy': spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
-            'spline_points': spaces.Box(low=-1.0, high=1.0, shape=(self.max_spline_points, 2), dtype=np.float32)
+            'spline_points': spaces.Box(low=-1.0, high=1.0, shape=(self.max_spline_points, 2), dtype=np.float32),
+            'current_insertion_cm': spaces.Box(low=INSERTION_ABS_MIN_CM, high=INSERTION_ABS_MAX_CM, shape=(), dtype=np.float32),
+            'current_rotation_rad': spaces.Box(low=ROTATION_ABS_MIN_RAD, high=ROTATION_ABS_MAX_RAD, shape=(), dtype=np.float32),
         })
 
         self.current_step: int           = 0
@@ -235,9 +246,19 @@ class CatheterEnv(gym.Env):
 
         self._bridge.wait_driver_idle()
 
-        self._bridge.send_command(0.0, 0.0, relative=False)
+        # self._bridge.send_command(-1.0, 0.0, relative=False)
+        self.visual_home_guidewire()
+        # reached = self._bridge.spin_until(self._bridge.wait_done, MOTION_TIMEOUT)
+        # if not reached:
+        #     self._bridge.get_logger().warn('step(): motion timed out.')
+
+
+        time.sleep(0.1)
 
         obs, tip_xy, full_img, spline_pts = self._capture_obs()
+
+        time.sleep(0.1)
+
         if obs is None:
             raise RuntimeError('reset(): failed to capture initial image.')
 
@@ -258,7 +279,10 @@ class CatheterEnv(gym.Env):
             self.current_goal = self._sample_goal(full_img, tip_xy, spline_pts)
         
         img_h, img_w = full_img.shape[:2]
+        
         obs['goal_xy'] = (self.current_goal - tip_xy) / np.array([img_w, img_h], dtype=np.float32)
+
+        obs['current_insertion_cm'], obs['current_rotation_rad'] = self._bridge.get_catheter_total_insertion_rotation()
 
         info = {
             'tip_xy':  self.current_tip.tolist(),
@@ -279,6 +303,8 @@ class CatheterEnv(gym.Env):
         ins_rel, rot_rel = self._bridge.clamp_action(float(action[0]), float(action[1]))
         self._bridge.send_command(ins_rel, rot_rel)
         reached = self._bridge.spin_until(self._bridge.wait_done, MOTION_TIMEOUT)
+
+        time.sleep(0.2)
         if not reached:
             self._bridge.get_logger().warn('step(): motion timed out.')
 
@@ -309,6 +335,8 @@ class CatheterEnv(gym.Env):
         truncated = (not terminated) and (self.current_step >= self._max_steps)
 
         obs['goal_xy'] = (self.current_goal - tip_xy) / np.array([full_img.shape[1], full_img.shape[0]], dtype=np.float32)
+
+        obs['current_insertion_cm'], obs['current_rotation_rad'] = self._bridge.get_catheter_total_insertion_rotation()
 
         info = {
             'tip_xy':      tip_xy.tolist(),
@@ -387,13 +415,13 @@ class CatheterEnv(gym.Env):
         result = self._bridge.request_image()
         if result is None:
             return None, None, None, None
-
+        
         img_path, _w, _h = result
 
         full_img = load_image(img_path, _w, _h)
         if full_img is None:
             return None, None, None, None
-
+        
         # segment_guidewire expects a file path and returns a boolean skeleton
         skeleton = segment_guidewire(full_img)
         if skeleton is None:
@@ -405,6 +433,10 @@ class CatheterEnv(gym.Env):
 
         tip_position, spline_points = tip_result
         tip_xy = np.array(tip_position, dtype=np.float32)
+
+        if np.isnan(tip_xy).any():
+            self._bridge.get_logger().warn('Vision pipeline returned NaN for tip. Treating as capture failure.')
+            return None, None, None, None
 
         img_h, img_w = full_img.shape[:2]
         norm = self._crop_size
@@ -431,11 +463,15 @@ class CatheterEnv(gym.Env):
 
         return obs, tip_xy, full_img, spline_points
 
-    def _crop_around(self, img: np.ndarray, centre: np.ndarray) -> np.ndarray:
-        """Return a (crop_size × crop_size × 1) uint8 grayscale patch centred on *centre*."""
+    def _crop_around(self, img: np.ndarray, center: np.ndarray) -> np.ndarray:
+        """Return a (crop_size × crop_size × 1) uint8 grayscale patch centerd on *center*."""
         h, w = img.shape[:2]
         half = self._crop_size // 2
-        cx, cy = int(centre[0]), int(centre[1])
+        if center is None or np.isnan(center).any() or len(center) != 2:
+            return np.zeros((self._crop_size, self._crop_size, 1), dtype=np.uint8)
+        cx, cy = int(center[0]), int(center[1])
+        if cx is None or cy is None:
+            return np.zeros((self._crop_size, self._crop_size, 1), dtype=np.uint8)
 
         x1 = max(0, cx - half)
         y1 = max(0, cy - half)
@@ -608,6 +644,35 @@ class CatheterEnv(gym.Env):
                 'goal_xy': np.zeros(2, dtype=np.float32),
                 'spline_points': np.zeros((self.max_spline_points, 2), dtype=np.float32),
             }
+    
+    def visual_home_guidewire(self, home_x_threshold: float = 200.0):
+        self._bridge.get_logger().info("Starting Visual Homing Sequence...")
+        
+        while True:
+            obs, tip_xy, full_img, spline_pts = self._capture_obs()
+
+            if obs is None:
+                self._bridge.get_logger().warn("Failed to capture image during homing.")
+                break
+            
+            if tip_xy is None or tip_xy[0] <= home_x_threshold:
+                self._bridge.get_logger().info("Catheter has reached physical home!")
+                break
+                
+            # 3. If not home, pull back by 1.0 cm and check again
+            self._bridge.send_command(-1.0, 0.0)
+            self._bridge.spin_until(self._bridge.wait_done, MOTION_TIMEOUT)
+            
+            # Allow the camera buffer to clear motion blur
+            time.sleep(0.25)
+            
+        # 4. We are physically at 0.0. Tell the driver to reset its math.
+        msg = String()
+        msg.data = json.dumps({'set_home': True})
+        self._bridge.cmd_pub.publish(msg)
+        
+        # Give the driver a tiny moment to process the state change
+        time.sleep(0.1)
 
 def visualize_obs(obs):
     frame = cv2.cvtColor(obs['image'], cv2.COLOR_GRAY2BGR)
@@ -640,9 +705,13 @@ if __name__ == "__main__":
     print("Waiting for ROS 2 discovery...")
     time.sleep(1)
 
-    obs, info = gymEnv.reset()
 
+
+    obs, info = gymEnv.reset()
     obs, reward, terminated, truncated, info = gymEnv.step(np.array([0.0, 0.0]))
+
+
+
     # visualize_obs(obs)
 
     # Render if needed

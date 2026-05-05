@@ -7,3 +7,5 @@ guidewire_result*.png
 
 *.bin
 step*.png
+
+events.out*
