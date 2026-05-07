@@ -26,7 +26,7 @@ precomputed_goals = [
 ]
 
 # easy way to generate long horizon goals
-# precomputed_goals = [x[-1] for x in precomputed_goals]
+precomputed_goals = [[x[-1]] for x in precomputed_goals]
 
 def save_frame(filename, frame):
     cv2.imwrite(filename, frame)

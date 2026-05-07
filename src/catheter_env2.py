@@ -136,10 +136,10 @@ class CatheterRosBridge(Node):
     def clamp_action(self, ins_rel: float, rot_rel: float) -> tuple[float, float]:
         """Clamp so the resulting absolute position stays within safety limits."""
         cur_ins = self._latest_state.get('insertion_cm', 0.0) if self._latest_state else 0.0
-        cur_rot = self._latest_state.get('rotation_rad', 0.0) if self._latest_state else 0.0
+        # cur_rot = self._latest_state.get('rotation_rad', 0.0) if self._latest_state else 0.0
         new_ins = max(INSERTION_ABS_MIN_CM, min(INSERTION_ABS_MAX_CM, cur_ins + ins_rel))
-        new_rot = max(ROTATION_ABS_MIN_RAD, min(ROTATION_ABS_MAX_RAD, cur_rot + rot_rel))
-        return new_ins - cur_ins, new_rot - cur_rot
+        # new_rot = max(ROTATION_ABS_MIN_RAD, min(ROTATION_ABS_MAX_RAD, cur_rot + rot_rel))
+        return new_ins - cur_ins, rot_rel
 
     def append_record(self, record: dict):
         with open(self._jsonl_path, 'a') as f:
@@ -215,8 +215,8 @@ class CatheterEnv(gym.Env):
             'tip_xy':  spaces.Box(low=0.0, high=0.0, shape=(2,), dtype=np.float32),
             'goal_xy': spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
             'spline_points': spaces.Box(low=-1.0, high=1.0, shape=(self.max_spline_points, 2), dtype=np.float32),
-            'current_insertion_cm': spaces.Box(low=INSERTION_ABS_MIN_CM, high=INSERTION_ABS_MAX_CM, shape=(), dtype=np.float32),
-            'current_rotation_rad': spaces.Box(low=ROTATION_ABS_MIN_RAD, high=ROTATION_ABS_MAX_RAD, shape=(), dtype=np.float32),
+            'current_insertion_cm': spaces.Box(low=INSERTION_ABS_MIN_CM, high=INSERTION_ABS_MAX_CM, shape=(1,), dtype=np.float32),
+            'current_rotation_rad': spaces.Box(low=ROTATION_ABS_MIN_RAD, high=ROTATION_ABS_MAX_RAD, shape=(1,), dtype=np.float32),
         })
 
         self.current_step: int           = 0
@@ -282,7 +282,9 @@ class CatheterEnv(gym.Env):
         
         obs['goal_xy'] = (self.current_goal - tip_xy) / np.array([img_w, img_h], dtype=np.float32)
 
-        obs['current_insertion_cm'], obs['current_rotation_rad'] = self._bridge.get_catheter_total_insertion_rotation()
+        ins_cm, rot_rad = self._bridge.get_catheter_total_insertion_rotation()
+        obs['current_insertion_cm'] = np.array([ins_cm], dtype=np.float32)
+        obs['current_rotation_rad'] = np.array([rot_rad], dtype=np.float32)
 
         info = {
             'tip_xy':  self.current_tip.tolist(),
@@ -336,7 +338,9 @@ class CatheterEnv(gym.Env):
 
         obs['goal_xy'] = (self.current_goal - tip_xy) / np.array([full_img.shape[1], full_img.shape[0]], dtype=np.float32)
 
-        obs['current_insertion_cm'], obs['current_rotation_rad'] = self._bridge.get_catheter_total_insertion_rotation()
+        ins_cm, rot_rad = self._bridge.get_catheter_total_insertion_rotation()
+        obs['current_insertion_cm'] = np.array([ins_cm], dtype=np.float32)
+        obs['current_rotation_rad'] = np.array([rot_rad], dtype=np.float32)
 
         info = {
             'tip_xy':      tip_xy.tolist(),
@@ -708,7 +712,7 @@ if __name__ == "__main__":
 
 
     obs, info = gymEnv.reset()
-    obs, reward, terminated, truncated, info = gymEnv.step(np.array([0.0, 0.0]))
+    obs, reward, terminated, truncated, info = gymEnv.step(np.array([2.0, 0.0]))
 
 
 

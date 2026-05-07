@@ -9,3 +9,8 @@ guidewire_result*.png
 step*.png
 
 events.out*
+
+
+*.zip
+*.jsonl
+*.png

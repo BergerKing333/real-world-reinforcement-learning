@@ -6,5 +6,12 @@
         "statusBar.debuggingForeground": "#FAFAFA",
         "statusBar.noFolderBackground": "#3B3B3B",
         "statusBar.noFolderForeground": "#FAFAFA"
-    }
+    },
+    "python-envs.pythonProjects": [
+        {
+            "path": "training_videos_local_goals_1",
+            "envManager": "ms-python.python:venv",
+            "packageManager": "ms-python.python:pip"
+        }
+    ]
 }
